@@ -1,0 +1,10 @@
+Written by : Shashwat Patni
+
+ How to get the files there
+That folder is protected, so you can't drag files into it from a file manager. Android Studio can reach it because the app is a debug build:
+
+1. Install and run the app once first. Android creates /data/data/com.example.aquascope/ when the app is installed.
+2. Download and unzip the checkpoint from the Google Drive link in the README.
+3. In Android Studio, open View → Tool Windows → Device Explorer (called Device File Explorer in older versions).
+4. Go to /data/data/com.example.aquascope/files. Right-click the folder, choose Upload, and select the .ptl files.
+Restart the app so it loads the models again.
