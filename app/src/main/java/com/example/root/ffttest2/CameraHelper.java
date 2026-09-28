@@ -3,7 +3,6 @@ package com.example.root.ffttest2;
 import android.app.Activity;
 import android.graphics.Bitmap;
 import android.graphics.Matrix;
-import android.util.Size;
 import android.widget.ImageView;
 import androidx.annotation.NonNull;
 import androidx.camera.core.CameraSelector;
@@ -18,7 +17,6 @@ import java.nio.ByteBuffer;
 
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.lifecycle.LifecycleOwner;
-import androidx.camera.core.Camera;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -26,20 +24,24 @@ public class CameraHelper {
 
 	private static ImageView imageView;
 	private static ImageCapture imageCapture;
+	private static final ExecutorService cameraExecutor = Executors.newSingleThreadExecutor();
 
 
-	public static void bindCamera(@NonNull ProcessCameraProvider cameraProvider, Activity activity, ImageView mimageview) {
+	public static boolean bindCamera(@NonNull ProcessCameraProvider cameraProvider, Activity activity, ImageView mimageview) {
 		imageView = mimageview;
 
 		try {
+			cameraProvider.unbindAll();
 
 			Preview preview = new Preview.Builder()
-					.setTargetResolution(new Size(1920,1080))
 					.build();
 
 			CameraSelector cameraSelector = new CameraSelector.Builder()
 					.requireLensFacing(CameraSelector.LENS_FACING_BACK)
 					.build();
+			// PERFORMANCE mode (SurfaceView) works around a camera-view 1.0.0-alpha31 crash
+			// ("Unexpected rotation value -1") that only occurs in the TextureView path.
+			Constants.preview.setImplementationMode(PreviewView.ImplementationMode.PERFORMANCE);
 			Constants.preview.setScaleType(PreviewView.ScaleType.FIT_CENTER);
 
 			preview.setSurfaceProvider(Constants.preview.getSurfaceProvider());
@@ -47,9 +49,12 @@ public class CameraHelper {
 					.setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
 					.build();
 
-			Camera camera = cameraProvider.bindToLifecycle((LifecycleOwner) activity, cameraSelector, imageCapture, preview);
+			cameraProvider.bindToLifecycle((LifecycleOwner) activity, cameraSelector, imageCapture, preview);
+			return true;
 		} catch (Exception e) {
-			Utils.logd("Error binding camera: " + e.getMessage());
+			imageCapture = null;
+			Utils.logd("Error binding camera: " + e);
+			return false;
 		}
 	}
 
@@ -70,32 +75,41 @@ public class CameraHelper {
 	}
 
 	public static void takePicture2() {
+		if (imageCapture == null || imageView == null) {
+			Utils.logd("Camera capture requested before the camera was ready");
+			return;
+		}
+
 		Utils.log("camera capture");
-		ExecutorService cameraExecutor = Executors.newSingleThreadExecutor();
 		imageCapture.takePicture(cameraExecutor,
 				new ImageCapture.OnImageCapturedCallback() {
 					@Override
 					public void onCaptureSuccess(@NonNull ImageProxy image) {
-						// insert your code here.
-						Bitmap bitmap = imageProxyToBitmap(image);
-						Utils.log("bitmap size " + bitmap.getHeight() + " " + bitmap.getWidth());
-						Bitmap rotatedBitmap = rotateBitmap(bitmap, 90); // Rotate the bitmap
-						Bitmap croppedBitmap = cropCenterSquare(rotatedBitmap);
-						Bitmap scaledBitmap = Bitmap.createScaledBitmap(croppedBitmap, Constants.compressImageSize, Constants.compressImageSize, true);
-						Constants.currentCameraCapture = scaledBitmap;
-						imageView.post(new Runnable() {
-							@Override
-							public void run() {
-								imageView.setImageBitmap(scaledBitmap);
+						try {
+							Bitmap bitmap = imageProxyToBitmap(image);
+							if (bitmap == null) {
+								Utils.logd("Camera returned an undecodable JPEG frame");
+								return;
 							}
-						});
-						image.close();
-
+							Bitmap rotatedBitmap = rotateBitmap(bitmap, image.getImageInfo().getRotationDegrees());
+							Bitmap croppedBitmap = cropCenterSquare(rotatedBitmap);
+							Bitmap scaledBitmap = Bitmap.createScaledBitmap(croppedBitmap, Constants.compressImageSize, Constants.compressImageSize, true);
+							Constants.currentCameraCapture = scaledBitmap;
+							MainActivity.mBitmap = scaledBitmap;
+							imageView.post(() -> {
+								imageView.setImageBitmap(scaledBitmap);
+								Utils.log("Picture captured and set as active bitmap");
+							});
+						} catch (Exception e) {
+							Utils.logd("Unable to process captured image: " + e);
+						} finally {
+							image.close();
+						}
 					}
 
 					@Override
 					public void onError(ImageCaptureException error) {
-						// insert your code here.
+						Utils.logd("Camera capture failed: " + error);
 					}
 				}
 		);

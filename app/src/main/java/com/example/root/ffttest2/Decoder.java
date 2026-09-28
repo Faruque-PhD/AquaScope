@@ -163,6 +163,11 @@ public class Decoder {
     public static void update_symbol_error_count(int[] rx_symbols) {
         int[] new_rx_symbols = Arrays.copyOfRange(rx_symbols, 4, rx_symbols.length);
 
+        if (Constants.gt_symbols_for_text_exp.length != new_rx_symbols.length) {
+            Utils.log("Symbol Error Count: length mismatch " + Constants.gt_symbols_for_text_exp.length + " vs " + new_rx_symbols.length);
+            return;
+        }
+
         int diff_count_raw = countDifferentElementsAtSamePosition_Symbol(Constants.gt_symbols_for_text_exp, new_rx_symbols);
 
         Constants.symbol_error_count_view.post(new Runnable() {
@@ -179,7 +184,8 @@ public class Decoder {
     public static int countDifferentElementsAtSamePosition_Symbol(int[] array1, int[] array2) {
         // Ensure both arrays have the same length to compare corresponding elements
         if (array1.length != array2.length) {
-            throw new IllegalArgumentException("Arrays must be of the same length");
+            // throw new IllegalArgumentException("Arrays must be of the same length");
+            return -1;
         }
 
         int count = 0;

@@ -8,6 +8,7 @@ import android.os.CountDownTimer;
 import android.preference.PreferenceManager;
 import android.speech.tts.TextToSpeech;
 import android.util.Log;
+import android.os.AsyncTask;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
@@ -82,6 +83,13 @@ public class Constants {
     public static Button cameraCaptureBtn;
     public static FrameLayout frameLayout;
     public static PreviewView preview;
+    // Global context and activity reference for transmission tasks
+    public static Context appContext;
+    public static MainActivity activityInstance;
+
+    // Transmission mode selection
+    public enum TransmissionMode { ACOUSTIC, OPTICAL }
+    public static TransmissionMode transmissionMode = TransmissionMode.ACOUSTIC;
     public static ListenableFuture<ProcessCameraProvider> cameraProviderFuture;
     public static Bitmap currentCameraCapture;
     public static String Sender_Latency_Str = "";
@@ -89,6 +97,7 @@ public class Constants {
 
     public static Switch logswitch, chirptypeswitch;
     public static boolean allowLog;
+public static boolean useMLMoE = false;
 
     public static List<String> modelIgnoreDisplayInSpinnerList = Arrays.asList("embedding_optimized.ptl",
             "encoder_optimized.ptl",
@@ -298,13 +307,41 @@ public class Constants {
         C4_7
     }
     // LoRa related
+    public enum CommMedium {
+        ACOUSTIC,
+        OPTICAL
+    }
+
     public enum Modulation {
+        LoRa,
         OFDM_freq_adapt,
         OFDM_freq_all,
-        LoRa,
         Noise,
         Chirp
     }
+
+    // Communication medium selection
+    public static CommMedium currentMedium = CommMedium.ACOUSTIC;
+    // Environment metrics
+    public static float ambientLightLux = 0f;
+    public static float opticalAttenuation = 0f;
+    public static float acousticSNR = 0f;
+    // Probe history buffer
+    public static final int BUFFER_SIZE = 10;
+    public static class ProbeRecord {
+        public float ambientLux;
+        public float attenuation;
+        public float snr;
+        public CommMedium preferred;
+        public ProbeRecord(float ambientLux, float attenuation, float snr, CommMedium preferred) {
+            this.ambientLux = ambientLux;
+            this.attenuation = attenuation;
+            this.snr = snr;
+            this.preferred = preferred;
+        }
+    }
+    public static LinkedList<ProbeRecord> probeHistory = new LinkedList<>();
+
 
     public static Modulation scheme = Modulation.LoRa;
 
@@ -346,7 +383,7 @@ public class Constants {
     public static int Ns_lora = 768;
     public static int Ns_Equalization = 960;
 
-    public static int EmbeddindBytes = 80;
+    public static int EmbeddindBytes = 96;
 
     public static float Battery_Level = 100;
 
@@ -454,8 +491,9 @@ public class Constants {
 
     public static double GammaThresh = .8;
 
-    public static int maxbits=640;
+    //public static int maxbits=640;
     //public static int maxbits=5;
+    public static int maxbits=768;
     public static int exp_num=5;
     public static int SNR_THRESH = 10; //unused
     public static Spinner spinner,spinner2,spinner3,spinner4, spinner5, spinnerCB;
@@ -471,7 +509,7 @@ public class Constants {
     public static NestedScrollView sview;
     public static CountDownTimer timer;
     public static EditText et1,et2,et3,et4,et5,et6,et7,et8,et9,et10,et11,et12,et13,et14,et15,et17,et18,et25,et26,et27;
-    public static SendChirpAsyncTask task;
+    public static AsyncTask task;
     public static User user;
     public static Switch sw1,sw2,sw3,sw4,sw5,sw6,sw7,sw8,sw9,sw10,sw11,sw12;
     public static EqMethod eqMethod = EqMethod.Freq;

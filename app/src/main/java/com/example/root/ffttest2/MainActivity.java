@@ -1,5 +1,7 @@
 package com.example.root.ffttest2;
 
+import static android.Manifest.*;
+
 import android.Manifest;
 import android.app.Activity;
 import android.app.NotificationManager;
@@ -28,6 +30,12 @@ import android.text.method.ScrollingMovementMethod;
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
+import android.widget.RadioGroup;
+import android.widget.RadioButton;
+import android.widget.Switch;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.CompoundButton;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.AdapterView;
@@ -99,7 +107,7 @@ import java.util.Map;
 public class MainActivity extends AppCompatActivity implements SensorEventListener {
 
     // ********************************** Start App Variable Definition **********************************
-    String[] perms = new String[]{Manifest.permission.RECORD_AUDIO, Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.CAMERA};
+    String[] perms = new String[]{permission.RECORD_AUDIO, permission.WRITE_EXTERNAL_STORAGE, permission.READ_EXTERNAL_STORAGE, permission.CAMERA, "android.permission.FLASHLIGHT", permission.BODY_SENSORS};
 
     private static SensorManager sensorManager;
     private Sensor accelerometer;
@@ -110,11 +118,14 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     // these can be put into constants
     private static ImageView mImageView;
     private static ImageView mImageView2;
+    private boolean cameraPreviewRequested;
 
     private Button runModelButton;
     private ProgressBar mProgressBar;
-    private Bitmap mBitmap = null;
+    public static Bitmap mBitmap = null;
     private Module mModule = null;
+    // MoE router instance for acoustic/optical transmission decision
+    private static MoE moeRouter = null;
 
     private int currentIndex = 0;
     private String defaultModelName = "lite_optimized_seg_240p.ptl";
@@ -305,13 +316,13 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
                 // set up embedding bytes
                 // can be more elegant, e.g., use on change
-                if (Constants.codebookSize == "1024") {
+                if (Constants.codebookSize.equals("1024")) {
                     Constants.EmbeddindBytes = 80;
                     Constants.maxbits = 640;
-                } else if (Constants.codebookSize == "256") {
+                } else if (Constants.codebookSize.equals("256")) {
                     Constants.EmbeddindBytes = 64;
                     Constants.maxbits = 512;
-                } else if (Constants.codebookSize == "4096") {
+                } else if (Constants.codebookSize.equals("4096")) {
                     Constants.EmbeddindBytes = 96;
                     Constants.maxbits = 768;
                 }
@@ -616,23 +627,44 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 //                Constants.mTransformer_256 = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "transformer_2_optimized.ptl"));
 //            }
 
+            // Consolidated 1dTokenizer codec modules. The assets in this repo are named
+            // encoder_optimized.ptl / decoder.ptl / transformer_optimized.ptl (tracked via
+            // Git LFS), so load those names instead of the historical "my*" names.
             if (Constants.newEncoder == null) {
-//                Constants.newEncoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myEncode_vulkan_optimized.ptl"), null, Device.VULKAN);
-                Constants.newEncoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myEncode_optimized.ptl"));
-
+                Constants.newEncoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "encoder_optimized.ptl"));
             }
 
             if (Constants.newDecoder == null) {
-//                Constants.newDecoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myDecode_vulkan_optimized.ptl"), null, Device.VULKAN);
-                Constants.newDecoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myDecode_normal.ptl"));
-
+                Constants.newDecoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "decoder.ptl"));
             }
-//
+
             if (Constants.newTransformer == null) {
-//                Constants.newTransformer = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myRecover_vulkan_optimized.ptl"), null, Device.VULKAN);
-                Constants.newTransformer = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myRecover_optimized.ptl"));
-
+                Constants.newTransformer = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "transformer_optimized.ptl"));
             }
+
+            // Multi-stage decoder modules still referenced by the codebook-1024/256 decode paths.
+            if (Constants.mDecoder1 == null) { // embedding lookup for codebook 1024
+                Constants.mDecoder1 = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "embedding_optimized.ptl"));
+            }
+            if (Constants.mDecoder2 == null) {
+                Constants.mDecoder2 = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "post_quant_conv_optimized.ptl"));
+            }
+            if (Constants.mDecoder3 == null) {
+                Constants.mDecoder3 = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "decoder.ptl"));
+            }
+            if (Constants.mEmbedding_256 == null) { // embedding lookup for codebook 256
+                Constants.mEmbedding_256 = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "embedding_256_optimized.ptl"));
+            }
+            if (Constants.mTransformer == null) {
+                Constants.mTransformer = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "transformer_optimized.ptl"));
+            }
+            if (Constants.mTransformer_256 == null) {
+                Constants.mTransformer_256 = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "transformer_2_optimized.ptl"));
+            }
+
+            Utils.logd("codec models loaded: newEncoder=" + (Constants.newEncoder != null)
+                    + " newDecoder=" + (Constants.newDecoder != null)
+                    + " newTransformer=" + (Constants.newTransformer != null));
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -790,6 +822,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                     }
                 }
             }
+            startCameraPreviewIfPermitted();
             // remove to solve double sendchirpasynctask
 //            if (audioGranted && writeGranted) {
 //                Constants.user  = Constants.User.Bob;
@@ -826,6 +859,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME);
         sensorManager.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_GAME);
         FullScreencall();
+        startCameraPreviewIfPermitted();
 
         Constants.user  = Constants.User.Bob;
         if (started == false) {
@@ -879,42 +913,71 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     }
 
     public static void startMethod(Activity av) {
-        if (Constants.expMode == Constants.Experiment.dataCollection) {
-            started = true;
-            Constants.work = true;
-            String formattedNow = "";
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                LocalDateTime now = LocalDateTime.now();
-                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
-                formattedNow = now.format(formatter);
-            } else {
-                formattedNow = "not_available";
-            }
-            Constants.task = new SendChirpAsyncTask(av, Constants.mattempts, Constants.sendButton, Constants.defaultBackground, Constants.testEnd2EndImageBitmaps, mImageView, mImageView2, formattedNow);
-            Constants.task.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
-        } else {
-            started = true;
-//            sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_FASTEST);
-//            sensorManager.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_FASTEST);
+        started = true;
+        Constants.work = true;
 
+        String formattedNow = getFormattedNow();
+
+        if (Constants.expMode != Constants.Experiment.dataCollection) {
             Constants.ts = System.currentTimeMillis();
-
-            Constants.work = true;
             FileOperations.mkdir(av, Utils.getDirName());
-//        FileOperations.writetofile(av, Constants.ts+"", Utils.genName(Constants.SignalType.Timestamp,0)+".txt");
-
             Constants.tv6.setText(Utils.trimmed_ts());
-            String formattedNow = "";
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                LocalDateTime now = LocalDateTime.now();
-                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
-                formattedNow = now.format(formatter);
-            } else {
-                formattedNow = "not_available";
-            }
-            Constants.task = new SendChirpAsyncTask(av, Constants.mattempts, Constants.sendButton, Constants.defaultBackground, Constants.testEnd2EndImageBitmaps, mImageView, mImageView2, formattedNow);
-            Constants.task.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
         }
+
+        // Decision: route the transmission through the rule-based MoE router.
+        Constants.CommMedium medium = MoE.route(Constants.currentMedium);
+
+        // testExp keeps the classic acoustic pipeline with its hard-coded test bitmap.
+        if (Constants.expMode == Constants.Experiment.testExp
+                && medium == Constants.CommMedium.OPTICAL) {
+            Utils.log("testExp is acoustic-only; forcing the acoustic medium");
+            medium = Constants.CommMedium.ACOUSTIC;
+        }
+
+        // Bob is the receiver role; there is no optical receive/feedback pipeline yet,
+        // so never auto-launch an optical burst on Bob (e.g. on every onResume).
+        if (Constants.user.equals(Constants.User.Bob)
+                && medium == Constants.CommMedium.OPTICAL) {
+            Utils.log("Optical receiver not implemented; skipping transmission as Bob");
+            return;
+        }
+
+        if (medium == Constants.CommMedium.ACOUSTIC) {
+            Constants.task = new SendChirpAsyncTask(av, Constants.mattempts, Constants.sendButton,
+                    Constants.defaultBackground, Constants.testEnd2EndImageBitmaps,
+                    mImageView, mImageView2, formattedNow);
+        } else {
+            Bitmap bmp = resolveSendBitmap();
+            if (bmp == null) {
+                Utils.log("No captured image available for optical transmission");
+                return;
+            }
+            Constants.task = new SendOpticalAsyncTask(av, bmp);
+        }
+        Constants.task.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+    }
+
+    private static String getFormattedNow() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            LocalDateTime now = LocalDateTime.now();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+            return now.format(formatter);
+        }
+        return "not_available";
+    }
+
+    /**
+     * The image to transmit: the most recent camera capture, falling back to a test image
+     * when the user has not taken a picture yet.
+     */
+    public static Bitmap resolveSendBitmap() {
+        if (Constants.currentCameraCapture != null) {
+            return Constants.currentCameraCapture;
+        }
+        if (Constants.testEnd2EndImageBitmaps != null && !Constants.testEnd2EndImageBitmaps.isEmpty()) {
+            return Constants.testEnd2EndImageBitmaps.get(0);
+        }
+        return Constants.testExpBitmap;
     }
 
 
@@ -1435,24 +1498,14 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 //        Constants.frameLayout = findViewById(R.id.frameLayout);
         Constants.preview = findViewById(R.id.previewView);
         Constants.cameraCaptureBtn = findViewById(R.id.cameraCapture);
-        Constants.cameraProviderFuture = ProcessCameraProvider.getInstance(this);
-        Constants.cameraProviderFuture.addListener(() -> {
-            try {
-                ProcessCameraProvider cameraProvider = Constants.cameraProviderFuture.get();
-                CameraHelper.bindCamera(cameraProvider, this, mImageView2);
-            } catch (ExecutionException | InterruptedException e) {
-                // No errors need to be handled for this Future.
-                // This should never be reached.
-            }
-        }, ContextCompat.getMainExecutor(this));
-
-        //        CameraHelper.startCamera(this, Constants.cameraTextureView, mImageView2);
+        Constants.cameraCaptureBtn.setEnabled(false);
         Constants.cameraCaptureBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 CameraHelper.takePicture2();
             }
         });
+        startCameraPreviewIfPermitted();
 
 
         // Resize:
@@ -1643,10 +1696,38 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         Constants.spinner = (Spinner) findViewById(R.id.spinner);
         Constants.spinner2 = (Spinner) findViewById(R.id.spinner2);
         Constants.spinner3 = (Spinner) findViewById(R.id.spinner3);
+        // New UI widgets for MoE routing
+        RadioGroup rgMedium = findViewById(R.id.radio_medium);
+        Constants.currentMedium = Constants.CommMedium.ACOUSTIC;
+        rgMedium.setOnCheckedChangeListener(new RadioGroup.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(RadioGroup group, int checkedId) {
+                if (checkedId == R.id.radio_acoustic) {
+                    Constants.currentMedium = Constants.CommMedium.ACOUSTIC;
+                } else if (checkedId == R.id.radio_optical) {
+                    Constants.currentMedium = Constants.CommMedium.OPTICAL;
+                }
+                Utils.log("transmission medium = " + Constants.currentMedium);
+            }
+        });
+        Switch swMLMoE = findViewById(R.id.switch_ml_moe);
+        swMLMoE.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                Constants.useMLMoE = isChecked;
+            }
+        });
         Constants.spinner4 = (Spinner) findViewById(R.id.spinner4);
         Constants.spinner5 = (Spinner) findViewById(R.id.spinner5);
         Constants.spinnerCB = (Spinner) findViewById(R.id.spinnerCB);
         Constants.sendButton = (Button) findViewById(R.id.sendbutton);
+        // When the dedicated send button is pressed, use the same startWrapper logic
+        Constants.sendButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startWrapper();
+            }
+        });
         Constants.readyButton = (Button) findViewById(R.id.readyButton);
 
         // when click, pop up a dialog to ask experiment details
@@ -1896,13 +1977,13 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 Utils.logd("Codebook Size is set to " + Constants.codebookSize);
 
                 // can be more elegant, e.g., use on change
-                if (Constants.codebookSize == "1024") {
+                if (Constants.codebookSize.equals("1024")) {
                     Constants.EmbeddindBytes = 80;
                     Constants.maxbits = 640;
-                } else if (Constants.codebookSize == "256") {
+                } else if (Constants.codebookSize.equals("256")) {
                     Constants.EmbeddindBytes = 64;
                     Constants.maxbits = 512;
-                } else if (Constants.codebookSize == "4096") {
+                } else if (Constants.codebookSize.equals("4096")) {
                     Constants.EmbeddindBytes = 96;
                     Constants.maxbits = 768;
                 } else {
@@ -2653,6 +2734,42 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 //                }
 //            }
 //        });
+    }
+
+    private void startCameraPreviewIfPermitted() {
+        if (cameraPreviewRequested) {
+            return;
+        }
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            Constants.cameraCaptureBtn.setEnabled(false);
+            return;
+        }
+
+        cameraPreviewRequested = true;
+        Constants.cameraCaptureBtn.setEnabled(false);
+        Constants.cameraProviderFuture = ProcessCameraProvider.getInstance(this);
+        Constants.cameraProviderFuture.addListener(() -> {
+            try {
+                ProcessCameraProvider cameraProvider = Constants.cameraProviderFuture.get();
+                boolean bound = CameraHelper.bindCamera(cameraProvider, this, mImageView2);
+                if (bound) {
+                    Constants.preview.setVisibility(View.VISIBLE);
+                }
+                Constants.cameraCaptureBtn.setEnabled(bound);
+                if (!bound) {
+                    cameraPreviewRequested = false;
+                }
+            } catch (ExecutionException e) {
+                cameraPreviewRequested = false;
+                Utils.logd("Unable to obtain camera provider: " + e);
+            } catch (InterruptedException e) {
+                cameraPreviewRequested = false;
+                Thread.currentThread().interrupt();
+                Utils.logd("Camera provider initialization was interrupted");
+            }
+        }, ContextCompat.getMainExecutor(this));
     }
 
     // ********************************** End App Long Methods **********************************

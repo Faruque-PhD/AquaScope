@@ -11,7 +11,7 @@
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/myview"
         android:layout_width="match_parent"
-        android:layout_height="match_parent">
+        android:layout_height="wrap_content">
 
         <com.jjoe64.graphview.GraphView
             android:id="@+id/graphProd"
@@ -77,6 +77,55 @@
             android:visibility="gone"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="@+id/button" />
+
+        <RadioGroup
+            android:id="@+id/radio_medium"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:checkedButton="@id/radio_acoustic"
+            android:orientation="horizontal"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent">
+
+            <RadioButton
+                android:id="@+id/radio_acoustic"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Acoustic" />
+
+            <RadioButton
+                android:id="@+id/radio_optical"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Optical" />
+        </RadioGroup>
+
+        <Switch
+            android:id="@+id/switch_ml_moe"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Use ML MoE"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/radio_medium" />
+
+        <TextView
+            android:id="@+id/textview_moe_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="MoE Status"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/switch_ml_moe" />
+
+        <androidx.constraintlayout.widget.Group
+            android:id="@+id/acoustic_group"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            app:constraint_referenced_ids="spinner,spinner2,spinner3,spinner4,spinner5,spinnerCB" />
+
+        <androidx.constraintlayout.widget.Group
+            android:id="@+id/optical_group"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
 
         <TextView
             android:id="@+id/textView2"

@@ -28,7 +28,10 @@ import androidx.core.app.NotificationCompat;
 
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -125,7 +128,7 @@ public class Utils {
 
         long[] longs;
 
-        if (Constants.codebookSize == "1024") {
+        if (Constants.codebookSize.equals("1024")) {
             int numInts = allBits.length() / 10; // Calculate how many 10-bit integers are needed
 
             longs = new long[numInts];
@@ -139,7 +142,7 @@ public class Utils {
             }
 
             //return longs;
-        } else if (Constants.codebookSize == "256") {
+        } else if (Constants.codebookSize.equals("256")) {
             // 0711 need to adapt to 8 bit
             int numInts = allBits.length() / 8; // Calculate how many 8-bit integers are needed
 
@@ -151,7 +154,7 @@ public class Utils {
             }
 
             //return longs;
-        } else if (Constants.codebookSize == "4096") {
+        } else if (Constants.codebookSize.equals("4096")) {
             // 0711 need to adapt to 8 bit
             int numInts = allBits.length() / 12; // Calculate how many 8-bit integers are needed
 
@@ -867,14 +870,14 @@ public class Utils {
         // Step 1: Convert all long integers to a single binary string with each being a 10-bit segment
         for (long value : embedding) {
             // Mask with 0x3FF to ensure only the lowest 10 bits are used
-            if (Constants.codebookSize == "1024") {
+            if (Constants.codebookSize.equals("1024")) {
                 String binaryString = String.format("%10s", Long.toBinaryString(value & 0x3FF)).replace(' ', '0');
                 binaryStringBuilder.append(binaryString);
-            } else if (Constants.codebookSize == "256") {
+            } else if (Constants.codebookSize.equals("256")) {
                 // 0711 need to adapt to 8 bit
                 String binaryString = String.format("%8s", Long.toBinaryString(value & 0xFF)).replace(' ', '0');
                 binaryStringBuilder.append(binaryString);
-            } else if (Constants.codebookSize == "4096") {
+            } else if (Constants.codebookSize.equals("4096")) {
                 // 0711 need to adapt to 8 bit
                 String binaryString = String.format("%12s", Long.toBinaryString(value & 0xFFF)).replace(' ', '0');
                 binaryStringBuilder.append(binaryString);
@@ -913,7 +916,7 @@ public class Utils {
         // The complete binary string
         String allBits = binaryStringBuilder.toString();
 
-        if (Constants.codebookSize == "1024") {
+        if (Constants.codebookSize.equals("1024")) {
             int numInts = allBits.length() / 10; // Calculate how many 10-bit integers are needed
 
             long[] longs = new long[numInts];
@@ -924,7 +927,7 @@ public class Utils {
             }
 
             return longs;
-        } else if (Constants.codebookSize == "256") {
+        } else if (Constants.codebookSize.equals("256")) {
             // 0711 need to adapt to 8 bit
             int numInts = allBits.length() / 8; // Calculate how many 8-bit integers are needed
 
@@ -936,7 +939,7 @@ public class Utils {
             }
 
             return longs;
-        } else if (Constants.codebookSize == "4096") {
+        } else if (Constants.codebookSize.equals("4096")) {
             // 0711 need to adapt to 8 bit
             int numInts = allBits.length() / 12; // Calculate how many 8-bit integers are needed
 
@@ -2859,9 +2862,55 @@ public class Utils {
         File file = new File(context.getFilesDir(), assetName);
         if (file.exists() && file.length() > 0) {
             return file.getAbsolutePath();
-        } else {
-            throw new FileNotFoundException("The file " + assetName + " does not exist or is empty in the directory " + context.getFilesDir().getAbsolutePath());
         }
+        // The model loader reads from the app data dir, so if the file has not been
+        // extracted yet, copy it out of the packaged assets. This makes model loading
+        // self-contained whenever the package ships real model binaries.
+        // Packages built from a Git LFS checkout contain ~130 byte pointer files
+        // instead of the weights; those must not be extracted, otherwise the model
+        // loader would parse a pointer as a serialized module.
+        InputStream in = null;
+        OutputStream out = null;
+        try {
+            in = context.getAssets().open(assetName);
+            boolean isLfsPointer = isGitLfsPointer(in);
+            if (isLfsPointer) {
+                throw new FileNotFoundException("The file " + assetName
+                        + " does not exist or is empty in the directory "
+                        + context.getFilesDir().getAbsolutePath()
+                        + " and the packaged copy is a Git LFS pointer, not a model."
+                        + " Install the real model with: adb push " + assetName
+                        + " /data/local/tmp/ && adb shell run-as " + context.getPackageName()
+                        + " cp /data/local/tmp/" + assetName + " files/" + assetName);
+            }
+            out = new FileOutputStream(file);
+            byte[] buffer = new byte[1 << 20];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+            }
+            out.flush();
+        } finally {
+            if (out != null) {
+                out.close();
+            }
+            if (in != null) {
+                in.close();
+            }
+        }
+        return file.getAbsolutePath();
+    }
+
+    private static boolean isGitLfsPointer(InputStream in) throws IOException {
+        in.mark(64);
+        byte[] head = new byte[64];
+        int read = in.read(head);
+        in.reset();
+        if (read <= 0) {
+            return true;
+        }
+        String text = new String(head, 0, read, "UTF-8");
+        return text.startsWith("version https://git-lfs.github.com/spec/");
     }
 //    public static long[] encode_image(Bitmap mBitmap) {
 //        float[] mu = {0.0f, 0.0f, 0.0f};
@@ -2886,9 +2935,9 @@ public class Utils {
 //        Constants.encode_sequence = results;
 //
 //        // Beitong0711: decide if we want to use code 1024 or 256
-//        if (Constants.codebookSize == "1024" || Constants.codebookSize == "4096") {
+//        if (Constants.codebookSize.equals("1024") || Constants.codebookSize.equals("4096")) {
 //            Utils.logd("use codebook " + Constants.codebookSize.toString() + " do nothing");
-//        } else if (Constants.codebookSize == "256") {
+//        } else if (Constants.codebookSize.equals("256")) {
 //            Utils.logd("use codebook 256 remapping the sequence");
 //            long[] results_256 = new long[results.length];
 //            for (int i = 0; i < results.length; i++) {
@@ -2911,6 +2960,10 @@ public class Utils {
 //    }
 
     public static long[] encode_image(Bitmap mBitmap) {
+        if (Constants.newEncoder == null) {
+            Utils.log("Image encoder model is not loaded (check codec assets)");
+            return new long[0];
+        }
         float[] mu = {0.0f, 0.0f, 0.0f};
         float[] std = {1.0f, 1.0f, 1.0f};
         final Tensor tempInputTensor = TensorImageUtils.bitmapToFloat32Tensor(mBitmap,
@@ -2923,9 +2976,9 @@ public class Utils {
         Constants.encode_sequence = results;
 
         // Beitong0711: decide if we want to use code 1024 or 256
-        if (Constants.codebookSize == "1024" || Constants.codebookSize == "4096") {
+        if (Constants.codebookSize.equals("1024") || Constants.codebookSize.equals("4096")) {
             Utils.logd("use codebook " + Constants.codebookSize.toString() + " do nothing");
-        } else if (Constants.codebookSize == "256") {
+        } else if (Constants.codebookSize.equals("256")) {
             Utils.logd("use codebook 256 remapping the sequence");
             long[] results_256 = new long[results.length];
             for (int i = 0; i < results.length; i++) {
@@ -2950,9 +3003,9 @@ public class Utils {
 //    public static Bitmap decode_image(long[] results) {
 //
 //        // Beitong0711: decide if we want to use code 1024 or 256
-//        if (Constants.codebookSize == "1024" || Constants.codebookSize == "4096") {
+//        if (Constants.codebookSize.equals("1024") || Constants.codebookSize.equals("4096")) {
 //            Utils.logd("use codebook " + Constants.codebookSize.toString() + " do nothing");
-//        } else if (Constants.codebookSize == "256") {
+//        } else if (Constants.codebookSize.equals("256")) {
 //            Utils.logd("decode use codebook 256 remapping the sequence");
 //            long[] results_1024 = new long[results.length];
 //            for (int i = 0; i < results.length; i++) {
@@ -2972,9 +3025,9 @@ public class Utils {
 //
 //        Tensor inputTensordecode = Tensor.fromBlob(results, new long[]{64});
 //        Tensor outTensorsdecode;
-//        if (Constants.codebookSize == "1024") {
+//        if (Constants.codebookSize.equals("1024")) {
 //            outTensorsdecode = Constants.mDecoder1.forward(IValue.from(inputTensordecode)).toTensor();
-//        } else if (Constants.codebookSize == "256") {
+//        } else if (Constants.codebookSize.equals("256")) {
 //            outTensorsdecode = Constants.mEmbedding_256.forward(IValue.from(inputTensordecode)).toTensor();
 //        } else {
 //            Utils.logd("wrong codebookSize. Still use codebook 1024 setting");
@@ -3002,9 +3055,9 @@ public class Utils {
     public static Bitmap decode_image(long[] results) {
 
         // Beitong0711: decide if we want to use code 1024 or 256
-        if (Constants.codebookSize == "1024" || Constants.codebookSize == "4096") {
+        if (Constants.codebookSize.equals("1024") || Constants.codebookSize.equals("4096")) {
             Utils.logd("use codebook " + Constants.codebookSize.toString() + " do nothing");
-        } else if (Constants.codebookSize == "256") {
+        } else if (Constants.codebookSize.equals("256")) {
             Utils.logd("decode use codebook 256 remapping the sequence");
             long[] results_1024 = new long[results.length];
             for (int i = 0; i < results.length; i++) {
@@ -3024,15 +3077,15 @@ public class Utils {
 
         Tensor inputTensordecode = Tensor.fromBlob(results, new long[]{64});
         Tensor outTensorsdecode;
-        if (Constants.codebookSize == "1024") {
+        if (Constants.codebookSize.equals("1024")) {
             outTensorsdecode = Constants.mDecoder1.forward(IValue.from(inputTensordecode)).toTensor();
             outTensorsdecode = Constants.mDecoder2.forward(IValue.from(outTensorsdecode)).toTensor();
             outTensorsdecode = Constants.mDecoder3.forward(IValue.from(outTensorsdecode)).toTensor();
-        } else if (Constants.codebookSize == "256") {
+        } else if (Constants.codebookSize.equals("256")) {
             outTensorsdecode = Constants.mEmbedding_256.forward(IValue.from(inputTensordecode)).toTensor();
             outTensorsdecode = Constants.mDecoder2.forward(IValue.from(outTensorsdecode)).toTensor();
             outTensorsdecode = Constants.mDecoder3.forward(IValue.from(outTensorsdecode)).toTensor();
-        } else if (Constants.codebookSize == "4096") {
+        } else if (Constants.codebookSize.equals("4096")) {
             outTensorsdecode = Constants.newDecoder.forward(IValue.from(inputTensordecode)).toTensor();
         } else {
             Utils.logd("wrong codebookSize. Still use codebook 1024 setting");
@@ -3059,9 +3112,9 @@ public class Utils {
 //    public static void decode_image_receiver(long[] results, ImageView mImageView, boolean before) {
 //
 //        // Beitong0711: decide if we want to use code 1024 or 256
-//        if (Constants.codebookSize == "1024" || Constants.codebookSize == "4096") {
+//        if (Constants.codebookSize.equals("1024") || Constants.codebookSize.equals("4096")) {
 //            Utils.logd("use codebook " + Constants.codebookSize.toString() + " do nothing");
-//        } else if (Constants.codebookSize == "256") {
+//        } else if (Constants.codebookSize.equals("256")) {
 //            Utils.logd("decode use codebook 256 remapping the sequence");
 //            long[] results_1024 = new long[results.length];
 //            for (int i = 0; i < results.length; i++) {
@@ -3082,11 +3135,11 @@ public class Utils {
 //        final long startTime_decode_image = SystemClock.elapsedRealtime();
 //        Tensor inputTensordecode = Tensor.fromBlob(results, new long[]{64});
 //        Tensor outTensorsdecode;
-//        if (Constants.codebookSize == "1024") {
+//        if (Constants.codebookSize.equals("1024")) {
 //            outTensorsdecode = Constants.mDecoder1.forward(IValue.from(inputTensordecode)).toTensor();
-//        } else if (Constants.codebookSize == "256") {
+//        } else if (Constants.codebookSize.equals("256")) {
 //            outTensorsdecode = Constants.mEmbedding_256.forward(IValue.from(inputTensordecode)).toTensor();
-//        } else if (Constants.codebookSize == "4096") {
+//        } else if (Constants.codebookSize.equals("4096")) {
 //            outTensorsdecode = Constants.newDecoder.forward(IValue.from(inputTensordecode)).toTensor();
 //        } else {
 //            Utils.logd("wrong codebookSize. Still use codebook 1024 setting");
@@ -3139,9 +3192,9 @@ public class Utils {
     public static void decode_image_receiver(long[] results, ImageView mImageView, boolean before) {
 
         // Beitong0711: decide if we want to use code 1024 or 256
-        if (Constants.codebookSize == "1024" || Constants.codebookSize == "4096") {
+        if (Constants.codebookSize.equals("1024") || Constants.codebookSize.equals("4096")) {
             Utils.logd("use codebook " + Constants.codebookSize.toString() + " do nothing");
-        } else if (Constants.codebookSize == "256") {
+        } else if (Constants.codebookSize.equals("256")) {
             Utils.logd("decode use codebook 256 remapping the sequence");
             long[] results_1024 = new long[results.length];
             for (int i = 0; i < results.length; i++) {
@@ -3162,15 +3215,15 @@ public class Utils {
         final long startTime_decode_image = SystemClock.elapsedRealtime();
         Tensor inputTensordecode = Tensor.fromBlob(results, new long[]{64});
         Tensor outTensorsdecode;
-        if (Constants.codebookSize == "1024") {
+        if (Constants.codebookSize.equals("1024")) {
             outTensorsdecode = Constants.mDecoder1.forward(IValue.from(inputTensordecode)).toTensor();
             outTensorsdecode = Constants.mDecoder2.forward(IValue.from(outTensorsdecode)).toTensor();
             outTensorsdecode = Constants.mDecoder3.forward(IValue.from(outTensorsdecode)).toTensor();
-        } else if (Constants.codebookSize == "256") {
+        } else if (Constants.codebookSize.equals("256")) {
             outTensorsdecode = Constants.mEmbedding_256.forward(IValue.from(inputTensordecode)).toTensor();
             outTensorsdecode = Constants.mDecoder2.forward(IValue.from(outTensorsdecode)).toTensor();
             outTensorsdecode = Constants.mDecoder3.forward(IValue.from(outTensorsdecode)).toTensor();
-        } else if (Constants.codebookSize == "4096") {
+        } else if (Constants.codebookSize.equals("4096")) {
             outTensorsdecode = Constants.newDecoder.forward(IValue.from(inputTensordecode)).toTensor();
         } else {
             Utils.logd("wrong codebookSize. Still use codebook 1024 setting");
@@ -3221,7 +3274,7 @@ public class Utils {
 
 //    public static long[] transformer_recover(long[] embeddings) {
 //
-////        if (Constants.codebookSize == "256") {
+////        if (Constants.codebookSize.equals("256")) {
 ////            // Beitong0711 skip recover for now
 ////            return embeddings;
 ////        }
@@ -3238,11 +3291,11 @@ public class Utils {
 //        final long startTimeTransformer = SystemClock.elapsedRealtime();
 //        for (int p = 0; p < Constants.recover_round; p++) {
 //            IValue result;
-//            if (Constants.codebookSize == "256") {
+//            if (Constants.codebookSize.equals("256")) {
 //                result = Constants.mTransformer_256.forward(IValue.from(inputTensorTransformer), IValue.from(inputTensorTransformer2));
-//            } else if (Constants.codebookSize == "1024") {
+//            } else if (Constants.codebookSize.equals("1024")) {
 //                result = Constants.mTransformer.forward(IValue.from(inputTensorTransformer), IValue.from(inputTensorTransformer2));
-//            } else if (Constants.codebookSize == "4096") {
+//            } else if (Constants.codebookSize.equals("4096")) {
 //                result = Constants.newTransformer.forward(IValue.from(inputTensorTransformer), IValue.from(inputTensorTransformer2));
 //            } else {
 //                result = Constants.mTransformer.forward(IValue.from(inputTensorTransformer), IValue.from(inputTensorTransformer2));
@@ -3283,7 +3336,7 @@ public class Utils {
 
     public static long[] transformer_recover(long[] embeddings) {
 
-//        if (Constants.codebookSize == "256") {
+//        if (Constants.codebookSize.equals("256")) {
 //            // Beitong0711 skip recover for now
 //            return embeddings;
 //        }
@@ -3291,7 +3344,7 @@ public class Utils {
         // receiver t5 transformer recover
         final long startTime_transformer_recover = SystemClock.elapsedRealtime();
         long[] prediction = new long[embeddings.length];
-        if (Constants.codebookSize == "4096") {
+        if (Constants.codebookSize.equals("4096")) {
 
             Tensor inputTensor = Tensor.fromBlob(embeddings, new long[]{64});
             Tensor result = Constants.newTransformer.forward(IValue.from(inputTensor)).toTensor();
@@ -3320,11 +3373,11 @@ public class Utils {
             final long startTimeTransformer = SystemClock.elapsedRealtime();
             for (int p = 0; p < Constants.recover_round; p++) {
                 IValue result;
-                if (Constants.codebookSize == "256") {
+                if (Constants.codebookSize.equals("256")) {
                     result = Constants.mTransformer_256.forward(IValue.from(inputTensorTransformer), IValue.from(inputTensorTransformer2));
-                } else if (Constants.codebookSize == "1024") {
+                } else if (Constants.codebookSize.equals("1024")) {
                     result = Constants.mTransformer.forward(IValue.from(inputTensorTransformer), IValue.from(inputTensorTransformer2));
-                } else if (Constants.codebookSize == "4096") {
+                } else if (Constants.codebookSize.equals("4096")) {
                     result = Constants.newTransformer.forward(IValue.from(inputTensorTransformer), IValue.from(inputTensorTransformer2));
                 } else {
                     result = Constants.mTransformer.forward(IValue.from(inputTensorTransformer), IValue.from(inputTensorTransformer2));

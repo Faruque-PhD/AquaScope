@@ -23,7 +23,13 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-public class SendChirpAsyncTask extends AsyncTask<Void, Void, Void> {
+/**
+ * AsyncTask that performs the chirp‑send routine.
+ * Previously used AsyncTask<Void, Void, Void> which caused a ClassCastException
+ * because Android supplies an Object[] to doInBackground. Switching the input
+ * type to Object avoids the illegal cast while keeping the task parameter‑less.
+ */
+public class SendChirpAsyncTask extends AsyncTask<Object, Void, Void> {
     Activity av;
     int num_measurements = 0;
     Button button;
@@ -96,6 +102,9 @@ public class SendChirpAsyncTask extends AsyncTask<Void, Void, Void> {
             tv4.setText("0");
         }
 
+        // Record acoustic transmission success in MoE buffer
+        MoEManager.recordResult(true, Constants.CommMedium.ACOUSTIC);
+
         Constants.sp1=null;
         Constants._OfflineRecorder = null;
         Constants.user  = Constants.User.Bob;
@@ -107,7 +116,7 @@ public class SendChirpAsyncTask extends AsyncTask<Void, Void, Void> {
     }
 
     @Override
-    protected Void doInBackground(Void... voids) {
+    protected Void doInBackground(Object... ignored) {
         Constants.WaitForFeedbackTime = Constants.WaitForFeedbackTimeDefault + Constants.SyncLag;
         Constants.WaitForSoundingTime = Constants.WaitForSoundingTimeDefault + Constants.SyncLag - Constants.SoundingOffset;
         Constants.WaitForBerTime = Constants.WaitForBerTimeDefault + Constants.SyncLag;
@@ -159,30 +168,19 @@ public class SendChirpAsyncTask extends AsyncTask<Void, Void, Void> {
             }
         }
         /* end2endTest mode
-        Sender sends 5 test images to receiver.
+        Sender sends the most recent camera capture to receiver (fallback to a test image).
          */
         else if (Constants.expMode == Constants.Experiment.end2endTest) {
             // end2endTest sender
             if (Constants.user.equals(Constants.User.Alice)) {
-                // step 1 read out file path in testImages and convert each image to scaled bitmap
-                // done in app onCreate and the bitmaps are passed as arguments
+                // step 1 use the camera captured bitmap (fallback to a test image)
+                Bitmap mBitmap = MainActivity.resolveSendBitmap();
 
-                // step 2 for each bitmap
-                for (Bitmap mBitmap : testEnd2EndImageBitmaps) {
+                // step 2-1 prepare send
+                Utils.imageSendPrepare(mBitmap, mImageView, TaskID);
 
-                    // step 2-1 prepare send
-                    Utils.imageSendPrepare(mBitmap, mImageView, TaskID);
-
-                    // step 2-2 send
-                    work(0, true);
-
-                    // step 2-3 sleep til next send
-                    try {
-                        Thread.sleep(Constants.end2endTestDelay);
-                    } catch (Exception e) {
-                        e.printStackTrace();
-                    }
-                }
+                // step 2-2 send
+                work(0, true);
             }
             // end2endTest receiver
             else if (Constants.user.equals(Constants.User.Bob)) {
@@ -198,7 +196,7 @@ public class SendChirpAsyncTask extends AsyncTask<Void, Void, Void> {
             if (Constants.user.equals(Constants.User.Alice)) {
 
                 // step 1 load the camera captured bitmap
-                Bitmap mBitmap = Constants.currentCameraCapture;
+                Bitmap mBitmap = MainActivity.resolveSendBitmap();
 
                 // step 2-1 prepare send
                 Utils.imageSendPrepare(mBitmap, mImageView, TaskID);
@@ -270,7 +268,7 @@ public class SendChirpAsyncTask extends AsyncTask<Void, Void, Void> {
                             // make folder for current sending information
                             FileOperations.mkdir(av, Constants.currentDirPath);
 
-                            Bitmap mBitmap = testEnd2EndImageBitmaps.get(i);
+                            Bitmap mBitmap = MainActivity.resolveSendBitmap();
                             Utils.imageSendPrepare(mBitmap, mImageView, TaskID);
 
                             work(0, true);
