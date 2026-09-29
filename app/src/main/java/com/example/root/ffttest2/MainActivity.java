@@ -119,6 +119,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private static ImageView mImageView;
     private static ImageView mImageView2;
     private boolean cameraPreviewRequested;
+    private OpticalReceiver opticalReceiver;
 
     private Button runModelButton;
     private ProgressBar mProgressBar;
@@ -627,44 +628,23 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 //                Constants.mTransformer_256 = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "transformer_2_optimized.ptl"));
 //            }
 
-            // Consolidated 1dTokenizer codec modules. The assets in this repo are named
-            // encoder_optimized.ptl / decoder.ptl / transformer_optimized.ptl (tracked via
-            // Git LFS), so load those names instead of the historical "my*" names.
             if (Constants.newEncoder == null) {
-                Constants.newEncoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "encoder_optimized.ptl"));
+//                Constants.newEncoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myEncode_vulkan_optimized.ptl"), null, Device.VULKAN);
+                Constants.newEncoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myEncode_optimized.ptl"));
+
             }
 
             if (Constants.newDecoder == null) {
-                Constants.newDecoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "decoder.ptl"));
-            }
+//                Constants.newDecoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myDecode_vulkan_optimized.ptl"), null, Device.VULKAN);
+                Constants.newDecoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myDecode_normal.ptl"));
 
+            }
+//
             if (Constants.newTransformer == null) {
-                Constants.newTransformer = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "transformer_optimized.ptl"));
-            }
+//                Constants.newTransformer = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myRecover_vulkan_optimized.ptl"), null, Device.VULKAN);
+                Constants.newTransformer = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myRecover_optimized.ptl"));
 
-            // Multi-stage decoder modules still referenced by the codebook-1024/256 decode paths.
-            if (Constants.mDecoder1 == null) { // embedding lookup for codebook 1024
-                Constants.mDecoder1 = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "embedding_optimized.ptl"));
             }
-            if (Constants.mDecoder2 == null) {
-                Constants.mDecoder2 = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "post_quant_conv_optimized.ptl"));
-            }
-            if (Constants.mDecoder3 == null) {
-                Constants.mDecoder3 = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "decoder.ptl"));
-            }
-            if (Constants.mEmbedding_256 == null) { // embedding lookup for codebook 256
-                Constants.mEmbedding_256 = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "embedding_256_optimized.ptl"));
-            }
-            if (Constants.mTransformer == null) {
-                Constants.mTransformer = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "transformer_optimized.ptl"));
-            }
-            if (Constants.mTransformer_256 == null) {
-                Constants.mTransformer_256 = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "transformer_2_optimized.ptl"));
-            }
-
-            Utils.logd("codec models loaded: newEncoder=" + (Constants.newEncoder != null)
-                    + " newDecoder=" + (Constants.newDecoder != null)
-                    + " newTransformer=" + (Constants.newTransformer != null));
 
         } catch (Exception e) {
             e.printStackTrace();
@@ -850,6 +830,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         super.onPause();
         Utils.logd("onpause");
         sensorManager.unregisterListener(this);
+        // Release the microphone held by the noise analyzer, otherwise the
+        // next audio pipeline in the session cannot open AudioRecord.
+        SensorFusion.get(this).stop();
         stopMethod();
     }
 
@@ -860,6 +843,10 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         sensorManager.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_GAME);
         FullScreencall();
         startCameraPreviewIfPermitted();
+        // Layer 1 of the MoE gating network: keep the turbidity and noise scores
+        // current for as long as the activity is in the foreground, so a routing
+        // decision always has fresh environment data.
+        SensorFusion.get(this).start();
 
         Constants.user  = Constants.User.Bob;
         if (started == false) {
@@ -924,35 +911,62 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             Constants.tv6.setText(Utils.trimmed_ts());
         }
 
-        // Decision: route the transmission through the rule-based MoE router.
-        Constants.CommMedium medium = MoE.route(Constants.currentMedium);
+        // Resolve the bitmap first: the camera modes must have a fresh capture
+        // before any routing happens, so we never route a transmission we cannot
+        // actually send.
+        Bitmap sendBitmap = resolveSendBitmap();
+        if (sendBitmap == null) {
+            Utils.log("startMethod aborted: no image to send for mode " + Constants.expMode);
+            return;
+        }
+
+        // Feed the sensor fusion pipeline with the exact frame being sent so the
+        // turbidity score reflects this image rather than an earlier tick.
+        SensorFusion fusion = SensorFusion.get(av);
+        ContextVector ctx = fusion.analyseNow(sendBitmap);
+
+        // Layer 2-4 of the MoE gating network. Image transmissions are normal
+        // priority, so they run the full scoring path.
+        MoE.Decision decision = MoE.decide(Constants.currentMedium, MoE.MessageType.NORMAL);
+        Utils.log("startMethod routing: " + decision
+                + " | frame turbidity=" + ctx.turbidityScore + " noise=" + ctx.noiseScore);
 
         // testExp keeps the classic acoustic pipeline with its hard-coded test bitmap.
         if (Constants.expMode == Constants.Experiment.testExp
-                && medium == Constants.CommMedium.OPTICAL) {
+                && decision.medium == Constants.CommMedium.OPTICAL) {
             Utils.log("testExp is acoustic-only; forcing the acoustic medium");
-            medium = Constants.CommMedium.ACOUSTIC;
+            decision = new MoE.Decision(Constants.CommMedium.ACOUSTIC, false,
+                    decision.highUncertainty, decision.acousticScore, decision.opticalScore,
+                    "testExp is acoustic-only");
         }
 
         // Bob is the receiver role; there is no optical receive/feedback pipeline yet,
         // so never auto-launch an optical burst on Bob (e.g. on every onResume).
         if (Constants.user.equals(Constants.User.Bob)
-                && medium == Constants.CommMedium.OPTICAL) {
+                && decision.medium == Constants.CommMedium.OPTICAL) {
             Utils.log("Optical receiver not implemented; skipping transmission as Bob");
             return;
         }
 
-        if (medium == Constants.CommMedium.ACOUSTIC) {
+        // An emergency message, or a fully vetoed environment, goes out on both
+        // channels. Only Alice transmits here; Bob still only receives.
+        if (decision.broadcastBoth && Constants.user.equals(Constants.User.Alice)) {
+            Utils.log("MoE requested a dual-channel broadcast; sending acoustic then optical");
+            Constants.task = new SendChirpAsyncTask(av, Constants.mattempts, Constants.sendButton,
+                    Constants.defaultBackground, Constants.testEnd2EndImageBitmaps,
+                    mImageView, mImageView2, formattedNow);
+            Constants.task.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+            Constants.task = new SendOpticalAsyncTask(av, sendBitmap);
+            Constants.task.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+            return;
+        }
+
+        if (decision.medium == Constants.CommMedium.ACOUSTIC) {
             Constants.task = new SendChirpAsyncTask(av, Constants.mattempts, Constants.sendButton,
                     Constants.defaultBackground, Constants.testEnd2EndImageBitmaps,
                     mImageView, mImageView2, formattedNow);
         } else {
-            Bitmap bmp = resolveSendBitmap();
-            if (bmp == null) {
-                Utils.log("No captured image available for optical transmission");
-                return;
-            }
-            Constants.task = new SendOpticalAsyncTask(av, bmp);
+            Constants.task = new SendOpticalAsyncTask(av, sendBitmap);
         }
         Constants.task.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
     }
@@ -967,17 +981,26 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     }
 
     /**
-     * The image to transmit: the most recent camera capture, falling back to a test image
-     * when the user has not taken a picture yet.
+     * The image to transmit.
+     *
+     * The end-to-end modes (end2endTest, end2endCam, dataCollection) are camera
+     * modes: they must transmit the frame the user actually clicked, so they return
+     * only a fresh capture and refuse to substitute a preloaded asset. Returning a
+     * test image here is what made the app transmit the wrong frame in these modes.
+     *
+     * testExp is the one non-camera mode and keeps using its fixed test bitmap.
+     *
+     * @return the bitmap to send, or null when no fresh capture exists.
      */
     public static Bitmap resolveSendBitmap() {
-        if (Constants.currentCameraCapture != null) {
+        if (Constants.expMode == Constants.Experiment.testExp) {
+            return Constants.testExpBitmap;
+        }
+        if (Constants.hasFreshCameraCapture && Constants.currentCameraCapture != null) {
             return Constants.currentCameraCapture;
         }
-        if (Constants.testEnd2EndImageBitmaps != null && !Constants.testEnd2EndImageBitmaps.isEmpty()) {
-            return Constants.testEnd2EndImageBitmaps.get(0);
-        }
-        return Constants.testExpBitmap;
+        Utils.log("No fresh camera capture for this mode; refusing to send a preloaded image");
+        return null;
     }
 
 
@@ -1906,6 +1929,12 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                     }
                 }
                 Constants.expMode = Constants.Experiment.valueOf(arrayList4.get(position));
+                // Switching mode starts a new session: the previous capture belongs
+                // to the old one, so clear it rather than letting it be sent.
+                Constants.hasFreshCameraCapture = false;
+                Constants.currentCameraCapture = null;
+                MoE.reset();
+                MoEManager.reset();
                 stopMethod();
                 try {
                     Thread.sleep(Constants.spinnerStateChangeSleepTime);
@@ -2753,6 +2782,16 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         Constants.cameraProviderFuture.addListener(() -> {
             try {
                 ProcessCameraProvider cameraProvider = Constants.cameraProviderFuture.get();
+                // Arm optical reception before binding so the analysis use case is
+                // included in the same session rather than needing a second bind.
+                if (Constants.user == Constants.User.Bob) {
+                    if (opticalReceiver == null) {
+                        opticalReceiver = new OpticalReceiver();
+                        opticalReceiver.setListener(this::onOpticalTokensReceived);
+                    }
+                    CameraHelper.setOpticalReceiver(opticalReceiver);
+                    CameraHelper.setOpticalReceiveEnabled(true);
+                }
                 boolean bound = CameraHelper.bindCamera(cameraProvider, this, mImageView2);
                 if (bound) {
                     Constants.preview.setVisibility(View.VISIBLE);
@@ -2770,6 +2809,34 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 Utils.logd("Camera provider initialization was interrupted");
             }
         }, ContextCompat.getMainExecutor(this));
+    }
+
+    /**
+     * Reconstruct the image from a demodulated optical burst.
+     *
+     * Mirrors the acoustic receive path: decode the tokens as received, then run
+     * the error-correcting transformer and decode again, so both images are
+     * available for comparison. Token-level errors arrive as the lost-token marker
+     * (4096) and are repaired by the transformer.
+     */
+    private void onOpticalTokensReceived(long[] tokens, boolean[] tokenValid, int errorCount) {
+        new Thread(() -> {
+            try {
+                long[] masked = Arrays.copyOf(tokens, tokens.length);
+                for (int i = 0; i < tokens.length; i++) {
+                    if (!tokenValid[i]) {
+                        masked[i] = 4096;
+                    }
+                }
+                long[] prediction = Utils.transformer_recover(masked);
+                Utils.decode_image_receiver(tokens, mImageView2, true);
+                Utils.decode_image_receiver(prediction, mImageView, false);
+                MoE.recordResult(true, Constants.CommMedium.OPTICAL);
+            } catch (Exception e) {
+                Utils.logd("Optical reconstruction failed: " + e);
+                MoE.recordResult(false, Constants.CommMedium.OPTICAL);
+            }
+        }, "OpticalReconstruct").start();
     }
 
     // ********************************** End App Long Methods **********************************

@@ -168,13 +168,18 @@ public class SendChirpAsyncTask extends AsyncTask<Object, Void, Void> {
             }
         }
         /* end2endTest mode
-        Sender sends the most recent camera capture to receiver (fallback to a test image).
+        Sender sends the most recent camera capture to receiver.
          */
         else if (Constants.expMode == Constants.Experiment.end2endTest) {
             // end2endTest sender
             if (Constants.user.equals(Constants.User.Alice)) {
-                // step 1 use the camera captured bitmap (fallback to a test image)
+                // step 1 use the freshly clicked camera frame. Returns null when
+                // the user has not taken a picture, in which case we must not send.
                 Bitmap mBitmap = MainActivity.resolveSendBitmap();
+                if (mBitmap == null) {
+                    Utils.log("end2endTest: no camera capture, skipping send");
+                    return null;
+                }
 
                 // step 2-1 prepare send
                 Utils.imageSendPrepare(mBitmap, mImageView, TaskID);
@@ -195,8 +200,12 @@ public class SendChirpAsyncTask extends AsyncTask<Object, Void, Void> {
             // end2endCam sender
             if (Constants.user.equals(Constants.User.Alice)) {
 
-                // step 1 load the camera captured bitmap
+                // step 1 load the freshly clicked camera frame
                 Bitmap mBitmap = MainActivity.resolveSendBitmap();
+                if (mBitmap == null) {
+                    Utils.log("end2endCam: no camera capture, skipping send");
+                    return null;
+                }
 
                 // step 2-1 prepare send
                 Utils.imageSendPrepare(mBitmap, mImageView, TaskID);
@@ -269,6 +278,10 @@ public class SendChirpAsyncTask extends AsyncTask<Object, Void, Void> {
                             FileOperations.mkdir(av, Constants.currentDirPath);
 
                             Bitmap mBitmap = MainActivity.resolveSendBitmap();
+                            if (mBitmap == null) {
+                                Utils.log("dataCollection: no camera capture, stopping collection");
+                                return null;
+                            }
                             Utils.imageSendPrepare(mBitmap, mImageView, TaskID);
 
                             work(0, true);

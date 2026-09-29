@@ -20,6 +20,10 @@ public class MoEManager {
     // the same medium consumes the veto and switches to the other one. It is only
     // armed again by a subsequent failure, preventing repeated flips.
     private static Constants.CommMedium lastFailedMedium = null;
+    // Last SNR reported by an expert, kept so the feedback path can feed MoE's
+    // per-expert quality histories. Acoustic currently reports 0 because the
+    // existing LoRa pipeline does not measure SNR.
+    private static volatile int lastReportedSnr = 0;
 
     /**
      * Record the result of the latest transmission.
@@ -44,6 +48,28 @@ public class MoEManager {
         } else if (medium != null) {
             lastFailedMedium = medium;
         }
+        if (medium != null) {
+            MoE.recordResult(success, lastReportedSnr, medium);
+        }
+    }
+
+    /**
+     * Record an SNR reading for the expert that produced it, so the next feedback
+     * call to MoE carries a meaningful value.
+     */
+    public static void reportSnr(int snr) {
+        lastReportedSnr = Math.min(100, Math.max(0, snr));
+    }
+
+    public static int lastReportedSnr() {
+        return lastReportedSnr;
+    }
+
+    /** Drop all buffered state; used when a new experiment session starts. */
+    public static void reset() {
+        results.clear();
+        lastFailedMedium = null;
+        lastReportedSnr = 0;
     }
 
     /**

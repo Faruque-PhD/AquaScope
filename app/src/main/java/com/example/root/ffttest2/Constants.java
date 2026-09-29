@@ -92,6 +92,13 @@ public class Constants {
     public static TransmissionMode transmissionMode = TransmissionMode.ACOUSTIC;
     public static ListenableFuture<ProcessCameraProvider> cameraProviderFuture;
     public static Bitmap currentCameraCapture;
+    /**
+     * True once the user has clicked the shutter in the current session. The
+     * end-to-end send paths require a fresh capture rather than silently falling
+     * back to a preloaded test image, which is what previously made the app send
+     * the wrong frame in end2endTest / end2endCam / dataCollection.
+     */
+    public static boolean hasFreshCameraCapture = false;
     public static String Sender_Latency_Str = "";
     public static String Receiver_Latency_Str = "";
 
