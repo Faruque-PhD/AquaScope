@@ -183,3 +183,59 @@ DOES THE RECIEVER EVER SEND ANYTHING BACK ??
 
 NO NOT IN Aquascope
 
+
+A closed loop that resends based on **meaning** is a reasonable core for a paper. But "better than AquaScope" is only defensible on some metrics. On others you will lose, and reviewers will check.
+
+## Where AquaScope is weak (from the paper and the code)
+
+- **Nobody learns about a failure.** The sender never finds out whether the picture arrived (no reply in Proposed mode). The receiver also can't tell a wrong-but-realistic picture from a right one, because the decoder always draws something plausible.
+- **Failures are simply accepted.** In their own lake test (Fig. 19), 1 of 16 sends was missed completely (the start sound wasn't detected) and 1 lost its meaning (55% wrong numbers). Nothing was resent.
+- **Every number gets the same protection**, whether it matters much or not.
+- **Nothing is usable until the whole ~6 s message has arrived**, and the full end-to-end time is about 9.2 s.
+
+Your system targets exactly these gaps.
+
+## Metrics where you can credibly beat AquaScope
+
+| Metric | Why you'd win | AquaScope reference point |
+|---|---|---|
+| **Meaning-delivery rate**: % of sends ending with an understandable picture | Failures trigger a resend instead of being accepted | 14 of 16 (87.5%) in Fig. 19 |
+| **Silent-failure rate**: bad pictures delivered with nobody aware | The sender always learns the outcome | 100% of failures go unnoticed by the sender |
+| **Worst-case quality**: e.g. the worst 10% of LPIPS, not the average | Resends target exactly the bad cases | They only report the average (0.30) |
+| **Time to first meaning**: when the receiver first knows what the picture shows | The meaning header arrives in under 1 s | About 9.2 s |
+| **Missed-packet recovery** | A timeout plus resend handles an undetected start sound | Lost for good |
+| **Working range and movement limits** | Extra resend rounds can succeed where one shot fails | Quality degrades past 20 m, and error rates rise with fast movement |
+
+## Metrics where you'll likely lose, so state these upfront
+
+- **Average time per picture:** the reply alone adds about 0.45 s (roughly 7%) even when nothing is wrong, and resends add more.
+- **Energy:** the receiver now uses its speaker too.
+- **Computation:** a meaning model has to run on both phones.
+
+The fair way to present it is a **reliability-vs-time curve**: the share of sends that have delivered an acceptable picture by time *t*. AquaScope's curve flattens after one attempt, while yours keeps rising. That makes the trade-off visible instead of hiding it.
+
+## Where the novelty actually is
+
+A reviewer's first reaction will be **"you just added resend-on-request."** Resending is decades old. Your novelty has to be **what triggers the resend and what gets resent**:
+
+1. **Resend when the *meaning* is wrong, not when *bits* are wrong (core contribution).** Normal checks fail on any bit error, even one that doesn't change the picture. Meanwhile the generative decoder can produce a realistic but wrong picture with no check failing. Triggering on meaning should mean **fewer resends than a bit-check system, at the same final quality.** That comparison is your key result.
+2. **Resending only the affected groups of numbers**, chosen by the receiver's flags plus the meaning check.
+3. **A strongly protected meaning header**, so the meaning gets through even when the picture fails. The first 8 beeps of the message already carry extra protection, so the header could go there at no extra time.
+4. **An on-phone check that decides whether the picture is still right.** This is a genuine open problem. The AquaScope paper found meaning-based similarity scores (CLIP, DinoV2) matched human judgment worse than LPIPS. A reliable, cheap check trained on logged data could be a contribution in its own right.
+
+## Baselines you need so the novelty holds up
+
+| System | What it isolates |
+|---|---|
+| AquaScope as-is (one shot) | The starting point |
+| AquaScope + resend the whole picture on failure | Plain resend-on-request |
+| AquaScope + resend only groups whose bit-check failed | Smart resending *without* meaning |
+| **Yours: resend triggered by meaning** | Your contribution |
+| Yours without the header, or without the meaning check | Ablations: which part helps |
+
+If yours beats the third row on bits sent or time, at equal meaning-delivery rate, the novelty is clear.
+
+## Before committing
+
+- **Search for "semantic HARQ".** HARQ is the standard name for resend-on-request. Meaning-aware resending has been studied in radio-based semantic-communication research. Your distinct angle is the combination of underwater acoustic links, ordinary phones, one-way-at-a-time sound, generative token decoders, and hidden plausible-but-wrong pictures. You need to confirm nobody has already done that combination.
+- **Run the cheap first experiment:** measure how often AquaScope's damaged-number flags miss real errors, and how often a wrong picture still looks realistic. If both are rare, the meaning trigger has little to add. If they're common, you have your motivation figure.
