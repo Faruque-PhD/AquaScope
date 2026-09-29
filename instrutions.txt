@@ -1,5 +1,12 @@
 Written by : Shashwat Patni
 
+
+
+
+- The actual model lives in a google Drive
+here are the steps to extract it
+- hamming is off by default , choose 4/7 for the paper 
+
  How to get the files there
 That folder is protected, so you can't drag files into it from a file manager. Android Studio can reach it because the app is a debug build:
 
@@ -8,3 +15,171 @@ That folder is protected, so you can't drag files into it from a file manager. A
 3. In Android Studio, open View → Tool Windows → Device Explorer (called Device File Explorer in older versions).
 4. Go to /data/data/com.example.aquascope/files. Right-click the folder, choose Upload, and select the .ptl files.
 Restart the app so it loads the models again.
+
+
+
+
+
+Here is a summary of what actually is happening in the code:
+
+Here it is in plain terms.
+
+## What information is sent
+
+The picture is not sent. The sending phone runs its AI model on the picture and describes it as **64 numbers**. Each number is between 0 and 4095, and each one describes one area of the picture.
+
+That list of 64 numbers is the only information that travels. The receiving phone has the same AI model, and the model redraws a picture from those numbers. So the redrawn picture looks like the original, but it is not an exact copy.
+
+## How those 64 numbers become sound
+
+1. **Numbers to bits.** Each number needs 12 bits (ones and zeros), so 64 × 12 = **768 bits**.
+2. **Extra checking bits are added.** For every 4 bits of real information, 3 extra bits are added. They let the receiver notice a damaged bit and often fix it. The bits are also mixed up and spread out, so a burst of noise damages a little of many pieces instead of wiping out one piece completely.
+3. **Bits to beeps.** The bits are cut into small groups, mostly 5 bits each. A 5-bit group can stand for one of 32 values, and each value becomes **one beep**:
+   - Each beep is a short tone lasting 16 milliseconds that slides upward in pitch.
+   - The **pitch it starts at** tells you the value.
+   - The 768 bits turn into **274 beeps**.
+
+## What the sound sounds like, in order
+
+```
+[ start signal ] [ short silence ] [ R  b b b ] [ R  b b b ] [ R  b b b ] ... about 6 seconds in total
+```
+
+| Part | What it is | Carries picture info? |
+|---|---|---|
+| **Start signal** (0.2 s) | A fixed sound that both phones already know. It tells the receiver "a message begins here." | No |
+| **Silence** (under 0.1 s) | Empty space. | No |
+| **R: reference sound** (92 of them) | A fixed, known sound played before every 3 data beeps. The receiver knows exactly what R should sound like. It compares that with what it actually heard, which shows how the water and movement distorted the sound at that moment. It uses that to correct the next 3 beeps. | No |
+| **b: data beeps** (274 of them) | The actual information: the 64 numbers, plus the checking bits. | **Yes** |
+
+Nothing else is in the message: no name, no length, no "end" marker. The receiver already knows the message is always exactly 274 beeps long.
+
+## What the receiver does
+
+1. It listens constantly until it hears the **start signal**.
+2. It records the next ~6 seconds.
+3. It uses each **R** sound to correct the 3 beeps after it.
+4. It reads the **starting pitch** of each beep to get the 274 values back.
+5. It turns those values back into bits, uses the checking bits to fix what it can, and gets the **64 numbers**. It also marks which numbers are probably still wrong.
+6. A second AI model guesses better values for the numbers marked as probably wrong.
+7. The AI model **redraws the picture** from the 64 numbers.
+
+**In short:** the picture is shrunk to 64 numbers and sent as 274 beeps, with a known start sound at the front and a known reference sound every 3 beeps so the receiver can correct for the water. The receiver turns the beeps back into the 64 numbers and redraws the picture.
+
+
+
+HOW TO CONFIGURE THE app
+
+Both phones run the same app, and when the app opens it is already a **receiver**, listening all the time. A phone only becomes the **sender** when you press **Send** or choose "sender" in the settings pop-up. After sending, it goes back to listening on its own.
+
+Everything below comes from the code.
+
+## 1. Set these on both phones, every time
+
+| Setting on screen | Choose | Why |
+|---|---|---|
+| **Code rate** | **4/7** | The default is "None", and with "None" the picture data is sent as zeros. The test answer key only matches 4/7. |
+| **Tx protocol** | **Proposed** | This is AquaScope's own method. The other options are the comparison methods. |
+| **EqualizationMode** | **method5_tv_w_to_range** (already the default) | This is the full AquaScope receiver. |
+| **Codebook Size** | **4096** (already the default) | 64 numbers × 12 bits. |
+| **UseLinear** switch | **On** | This is the normal beep shape. |
+| **Log** switch | **On** | Saves the results to the phone. |
+| Model dropdown ("Seg Fish Low Res", "Encode Image", …) | Leave it alone, and **don't pick "Detect Fish" or "Count Fish"** | Those two shorten how long the receiver records, so it would cut off the picture. |
+
+Both phones must have **identical settings**. The receiver works out how long the message is from its own settings, so a mismatch means the picture is decoded wrongly.
+
+**You don't need the "Run Model" button.** It only runs the encoder on the picture shown on screen and reports how long it took. It does not change what gets sent. The README lists it as a step, but the code doesn't need it.
+
+## 2. Pick one of three ways to run it
+
+### A. Quick check: one fixed picture ("testExp")
+
+1. Set **ExpMode** = `testExp`.
+2. On the receiver, do nothing. It is already listening.
+3. On the sender, press **Send**. It waits 3 seconds (the "Send Delay" field) and then plays the sound.
+
+What gets sent is always the same file, `assets/7117_no_fish_2_f000002.jpg`. It is fixed in the code, and the picture shown on screen doesn't matter.
+
+**Use this mode when you want the error counters.** "Symbol Error Count" and "Embedding Error Count" compare what was received against a correct answer list stored in the code for one fixed picture. For any other picture those numbers are meaningless.
+
+### B. The 4 paper pictures, once each ("end2endTest")
+
+1. Set **ExpMode** = `end2endTest`.
+2. Press **Send** on the sender.
+
+It sends the 4 pictures in `assets/sendTestImages/`, 15 seconds apart. I opened them: they are the same 4 pictures as in the paper's Figure 19 (coral, yellow fish, spotted fish with striped fish, seagrass). The receiver shows each one as it arrives.
+
+### C. The real experiment runs: the **Ready** button
+
+The README says this belongs with `end2endTest`. In the code, pressing **Finish** always switches to a separate mode, `dataCollection`, whatever ExpMode says. It's the mode for repeated, timed runs.
+
+Press **Ready** on both phones and fill in the pop-up:
+
+| Field | What it actually does in the code |
+|---|---|
+| **Role** | `sender` on one phone, `receiver` on the other. |
+| **Times** | How many times to send each picture. |
+| **Image Count** | How many of the 4 pictures to use. **Don't pick 5**: only 4 pictures exist, so it would fail on the 5th. |
+| **Init Time Delay** | Seconds to wait before starting, giving you time to put the phones in the water. |
+| **Method** | `proposed` = AquaScope only. `all` = AquaScope plus the 3 comparison methods, one after another. The other options are subsets. |
+| **Environment** | `air` vs. anything else changes one value: the speed of sound the receiver assumes (340 m/s in air, 1500 m/s in water). **Choose a water option when testing in water.** |
+| **Distance, Mobility, Depth, Orientation** | **Labels only.** They name the results folder and change nothing about sending. You set up the distance and depth physically; these fields just record what you did. |
+| **Gap** | Keep at **0**. |
+| **CodebookSize** | **4096**. |
+
+Press **Finish** on both phones at roughly the same time. Every field except Role must match, because the receiver uses them to know when to expect each picture.
+
+## 3. Matching the paper's experiments
+
+| Paper result | How to do it with this app |
+|---|---|
+| Fig. 19: 4 pictures, each sent 4 times, between swimmers | Ready → Method `proposed`, Image Count `4`, Times `4` |
+| Fig. 20: distance, depth, orientation, movement, compared with other methods | Ready → Method `all`. Physically change the distance, depth and so on for each run, and set the matching label. |
+| Fig. 24: turning off parts of the receiver | Use **B** (end2endTest) and change **EqualizationMode** on both phones: `method1_once` → `method3_tv_wo_to` → `method4_tv_w_to` → `method5_tv_w_to_range`. The Ready mode can't do this because it always forces method5 for "proposed". |
+
+## 4. Where results appear
+
+- **On screen (receiver):** the left image is drawn from the numbers exactly as received. The right image is after the fix-up model has filled in numbers flagged as damaged.
+- **Saved files:** on the phone at `Android/data/com.example.aquascope/files/`. This includes what was sent and received, timing, and motion-sensor data. The Ready mode sorts it into folders named after the labels you picked.
+
+Before any of this, the 3 model files must be copied onto **both** phones, as covered earlier. Otherwise the app crashes when it tries to send or decode.
+
+
+
+CAN WE USE THE CAMERA?
+Both. The code has a camera mode, but it is only used when you pick it. Every other mode sends the pictures stored inside the app.
+
+## Which picture each mode sends
+
+| ExpMode | Picture sent |
+|---|---|
+| `testExp` | Always the stored file `7117_no_fish_2_f000002.jpg` |
+| `end2endTest` | The 4 stored pictures in `assets/sendTestImages/` |
+| Ready button (`dataCollection`) | The same 4 stored pictures |
+| **`end2endCam`** | **The last photo you took with the Camera button** |
+
+## How the camera mode works in the code
+
+1. Set **ExpMode** = `end2endCam`. The Code rate and other settings stay the same as before.
+2. Press the **Camera** button. The code in [CameraHelper.java:74-95](AquaScope/app/src/main/java/com/example/root/ffttest2/CameraHelper.java#L74-L95):
+   - takes a photo with the back camera,
+   - rotates it 90°,
+   - cuts out the middle square,
+   - shrinks it to 256×256,
+   - saves it as `Constants.currentCameraCapture` and shows it in the right-hand image on screen.
+3. Press **Send**. The sender sends whatever photo is in `currentCameraCapture` ([SendChirpAsyncTask.java:196-212](AquaScope/app/src/main/java/com/example/root/ffttest2/SendChirpAsyncTask.java#L196-L212)).
+
+Things to watch for:
+- **There is no live camera view on screen.** The viewfinder is set to hidden in the layout (`previewView` is `gone`), so you press Camera without seeing what the camera is pointed at. You see the photo only after it's taken.
+- **Take a photo before pressing Send.** If you press Send first, there is no photo to send and the sender will fail.
+- Each press of Send sends the most recent photo once. To send a new one, press Camera again, then Send.
+- The receiver needs nothing special. It decodes whatever arrives, just like in the other modes.
+
+## Which one the paper used
+
+For the measured results, the code for the Ready mode and `end2endTest` only ever sends the stored pictures. Those 4 stored pictures are the same ones shown in the paper's Figure 19. So their recorded experiments most likely used the stored pictures, not live photos. That comes from the code plus the matching pictures; the code alone can't prove how they ran it.
+
+DOES THE RECIEVER EVER SEND ANYTHING BACK ??
+
+NO NOT IN Aquascope
+
