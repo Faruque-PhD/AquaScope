@@ -4,7 +4,9 @@ import android.app.Activity;
 import android.graphics.Bitmap;
 import android.graphics.Matrix;
 import android.util.Size;
+import android.view.View;
 import android.widget.ImageView;
+import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.ImageCapture;
@@ -47,9 +49,21 @@ public class CameraHelper {
 					.setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
 					.build();
 
-			Camera camera = cameraProvider.bindToLifecycle((LifecycleOwner) activity, cameraSelector, imageCapture, preview);
+			// may be called again after permission is granted, so clear any earlier binding first
+			cameraProvider.unbindAll();
+			// a hidden PreviewView never provides a surface, which can stop the capture session from starting,
+			// so only bind the preview when the viewfinder is actually shown
+			Camera camera;
+			if (Constants.preview.getVisibility() == View.VISIBLE) {
+				camera = cameraProvider.bindToLifecycle((LifecycleOwner) activity, cameraSelector, imageCapture, preview);
+			} else {
+				camera = cameraProvider.bindToLifecycle((LifecycleOwner) activity, cameraSelector, imageCapture);
+			}
+			Utils.logd("camera bound");
 		} catch (Exception e) {
+			imageCapture = null;
 			Utils.logd("Error binding camera: " + e.getMessage());
+			showMessage("Camera could not start: " + e.getMessage());
 		}
 	}
 
@@ -71,34 +85,58 @@ public class CameraHelper {
 
 	public static void takePicture2() {
 		Utils.log("camera capture");
+		if (imageCapture == null || imageView == null) {
+			showMessage("Camera is not ready. Allow camera access, then press Camera again.");
+			return;
+		}
 		ExecutorService cameraExecutor = Executors.newSingleThreadExecutor();
 		imageCapture.takePicture(cameraExecutor,
 				new ImageCapture.OnImageCapturedCallback() {
 					@Override
 					public void onCaptureSuccess(@NonNull ImageProxy image) {
-						// insert your code here.
-						Bitmap bitmap = imageProxyToBitmap(image);
-						Utils.log("bitmap size " + bitmap.getHeight() + " " + bitmap.getWidth());
-						Bitmap rotatedBitmap = rotateBitmap(bitmap, 90); // Rotate the bitmap
-						Bitmap croppedBitmap = cropCenterSquare(rotatedBitmap);
-						Bitmap scaledBitmap = Bitmap.createScaledBitmap(croppedBitmap, Constants.compressImageSize, Constants.compressImageSize, true);
-						Constants.currentCameraCapture = scaledBitmap;
-						imageView.post(new Runnable() {
-							@Override
-							public void run() {
-								imageView.setImageBitmap(scaledBitmap);
-							}
-						});
-						image.close();
-
+						try {
+							Bitmap bitmap = imageProxyToBitmap(image);
+							Utils.log("bitmap size " + bitmap.getHeight() + " " + bitmap.getWidth());
+							Bitmap rotatedBitmap = rotateBitmap(bitmap, 90); // Rotate the bitmap
+							Bitmap croppedBitmap = cropCenterSquare(rotatedBitmap);
+							Bitmap scaledBitmap = Bitmap.createScaledBitmap(croppedBitmap, Constants.compressImageSize, Constants.compressImageSize, true);
+							Constants.currentCameraCapture = scaledBitmap;
+							imageView.post(new Runnable() {
+								@Override
+								public void run() {
+									imageView.setImageBitmap(scaledBitmap);
+								}
+							});
+						} catch (Exception e) {
+							Utils.logd("Error processing camera image: " + e.getMessage());
+							showMessage("Photo could not be processed: " + e.getMessage());
+						} finally {
+							image.close();
+							cameraExecutor.shutdown();
+						}
 					}
 
 					@Override
 					public void onError(ImageCaptureException error) {
-						// insert your code here.
+						Utils.logd("Error taking picture: " + error.getMessage());
+						showMessage("Photo failed: " + error.getMessage());
+						cameraExecutor.shutdown();
 					}
 				}
 		);
+	}
+
+	private static void showMessage(String message) {
+		Activity activity = MainActivity.av;
+		if (activity == null) {
+			return;
+		}
+		activity.runOnUiThread(new Runnable() {
+			@Override
+			public void run() {
+				Toast.makeText(activity, message, Toast.LENGTH_LONG).show();
+			}
+		});
 	}
 
 	private static Bitmap cropCenterSquare(Bitmap bitmap) {

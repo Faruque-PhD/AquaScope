@@ -764,6 +764,24 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         Utils.logd("oncreate end");
     }
 
+    private void bindCameraIfPermitted() {
+        if (Constants.cameraProviderFuture == null) {
+            return;
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            Utils.logd("camera permission not granted yet, camera will be bound once it is granted");
+            return;
+        }
+        Constants.cameraProviderFuture.addListener(() -> {
+            try {
+                ProcessCameraProvider cameraProvider = Constants.cameraProviderFuture.get();
+                CameraHelper.bindCamera(cameraProvider, this, mImageView2);
+            } catch (ExecutionException | InterruptedException e) {
+                Utils.logd("Error getting camera provider: " + e.getMessage());
+            }
+        }, ContextCompat.getMainExecutor(this));
+    }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -787,6 +805,12 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                         writeGranted=true;
                     } else {
                         requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 1234);
+                    }
+                }
+                else if (permission.equals(Manifest.permission.CAMERA)) {
+                    // the camera was bound in uiSetup before this permission existed, so bind it now
+                    if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                        bindCameraIfPermitted();
                     }
                 }
             }
@@ -1436,15 +1460,8 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         Constants.preview = findViewById(R.id.previewView);
         Constants.cameraCaptureBtn = findViewById(R.id.cameraCapture);
         Constants.cameraProviderFuture = ProcessCameraProvider.getInstance(this);
-        Constants.cameraProviderFuture.addListener(() -> {
-            try {
-                ProcessCameraProvider cameraProvider = Constants.cameraProviderFuture.get();
-                CameraHelper.bindCamera(cameraProvider, this, mImageView2);
-            } catch (ExecutionException | InterruptedException e) {
-                // No errors need to be handled for this Future.
-                // This should never be reached.
-            }
-        }, ContextCompat.getMainExecutor(this));
+        // binds now if camera permission is already granted, otherwise onRequestPermissionsResult binds later
+        bindCameraIfPermitted();
 
         //        CameraHelper.startCamera(this, Constants.cameraTextureView, mImageView2);
         Constants.cameraCaptureBtn.setOnClickListener(new View.OnClickListener() {
