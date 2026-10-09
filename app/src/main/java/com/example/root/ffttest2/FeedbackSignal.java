@@ -236,6 +236,14 @@ public class FeedbackSignal {
             bins.remove(bins.get(i));
         }
 
+        // Publish the ACK's measured quality. The feedback signal is exactly what
+        // the acoustic expert can tell the router about the water column: each
+        // accepted bin carries snr = signal - noise, and how many bins clear the
+        // threshold is how many usable subcarriers the channel offered. Before
+        // this the value was computed and thrown away, so the MoE's acoustic
+        // quality history was always fed 0 and the router was flying blind.
+        reportFeedbackSnr(bins);
+
         if (bins.size() >= 2) {
             int f1 = bins.get(bins.size() - 1).freq;
             int f2 = bins.get(bins.size() - 2).freq;
@@ -264,6 +272,49 @@ public class FeedbackSignal {
             return new int[]{bins.get(0).freq,bins.get(0).freq};
         }
         return new int[]{-1,-1};
+    }
+
+    /**
+     * Hand the ACK's measured channel quality to the MoE feedback layer.
+     *
+     * <p>Two things are published: the raw peak SNR, kept verbatim in
+     * {@link Constants#acousticSNR} for diagnostics, and a normalised 0-100 copy
+     * for {@link MoEManager#reportSnr(int)}, which is what the router's scoring
+     * term consumes as lastSnr/100.
+     *
+     * <p>The normalisation maps the detection threshold onto 50, so an SNR at
+     * {@link Constants#FEEDBACK_SNR_THRESH} — the weakest the decoder still
+     * trusts — scores as "adequate" and twice it scores full marks. The raw
+     * figure is not on a 0-100 scale; it is a magnitude difference, so feeding it
+     * straight through would score every healthy link at around 10/100 and make
+     * the acoustic weight meaningless.
+     *
+     * @param bins surviving candidate bins after the adjacency filter; may be empty
+     */
+    private static void reportFeedbackSnr(java.util.LinkedList<Bin> bins) {
+        double best = 0;
+        int usable = 0;
+        if (bins != null) {
+            for (Bin bin : bins) {
+                if (bin == null) continue;
+                usable++;
+                if (bin.snr > best) best = bin.snr;
+            }
+        }
+        Constants.acousticSNR = (float) best;
+        int normalised = (int) Math.round(
+                100.0 * best / (2.0 * Constants.FEEDBACK_SNR_THRESH));
+        normalised = Math.min(100, Math.max(0, normalised));
+        MoEManager.reportSnr(normalised);
+        // The raw bin SNR and the 0-100 the router actually consumes. Without
+        // this the export is invisible: the normalised figure only surfaces
+        // later, in MoE's own feedback line, where it cannot be attributed.
+        Utils.log("acoustic feedback SNR: best=" + best + " usable=" + usable
+                + "/" + (bins == null ? 0 : bins.size())
+                + " -> MoE snr=" + normalised);
+        Utils.log("MoE: acoustic ACK -> rawSnr=" + String.format(java.util.Locale.US, "%.1f", best)
+                + " normalised=" + normalised + " usableBins=" + usable
+                + " threshold=" + Constants.FEEDBACK_SNR_THRESH);
     }
 
     public static Bin search(LinkedList<Bin> bins, int freq) {

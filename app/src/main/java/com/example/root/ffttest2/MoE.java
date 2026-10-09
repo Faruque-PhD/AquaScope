@@ -198,6 +198,56 @@ public final class MoE {
         return decide(userSelection, MessageType.NORMAL).medium;
     }
 
+    /**
+     * Choose the medium the next transmission should use, now that one finished.
+     *
+     * <p>This is the reduced form of {@link #decide(Constants.CommMedium, MessageType)} used by the
+     * auto-switch: it applies only the Layer 3 hard vetoes against the live
+     * sensor scores and falls back to alternating when neither expert is
+     * disqualified. It exists so the switch reacts to the water rather than
+     * flipping on a timer, without committing to the full weighted scoring for a
+     * system whose sensors are only just being wired up.
+     *
+     * <p>When both experts are vetoed the fallback matches {@code decide()}'s
+     * degraded mode: acoustic, because it is the more reliable default, and the
+     * log says so rather than pretending the choice was good.
+     *
+     * @param completedOn the medium that has just finished transmitting.
+     * @return the medium to use next.
+     */
+    public static Constants.CommMedium autoSwitchTarget(Constants.CommMedium completedOn) {
+        ContextVector ctx = ContextVector.current();
+        boolean opticalVetoed = ctx.turbidityScore > RouterConfig.TURBIDITY_VETO_THRESHOLD;
+        boolean acousticVetoed = ctx.noiseScore > RouterConfig.ACOUSTIC_NOISE_VETO_THRESHOLD;
+
+        Constants.CommMedium chosen;
+        String reason;
+
+        if (opticalVetoed && acousticVetoed) {
+            chosen = Constants.CommMedium.ACOUSTIC;
+            reason = "both experts vetoed, acoustic by default (high uncertainty)";
+        } else if (opticalVetoed) {
+            chosen = Constants.CommMedium.ACOUSTIC;
+            reason = "optical vetoed: turbidity " + fmt(ctx.turbidityScore)
+                    + " > " + fmt(RouterConfig.TURBIDITY_VETO_THRESHOLD);
+        } else if (acousticVetoed) {
+            chosen = Constants.CommMedium.OPTICAL;
+            reason = "acoustic vetoed: noise " + fmt(ctx.noiseScore)
+                    + " > " + fmt(RouterConfig.ACOUSTIC_NOISE_VETO_THRESHOLD);
+        } else {
+            chosen = completedOn == Constants.CommMedium.OPTICAL
+                    ? Constants.CommMedium.ACOUSTIC
+                    : Constants.CommMedium.OPTICAL;
+            reason = "no veto active, alternating from " + completedOn;
+        }
+
+        Utils.log("MoE auto-switch target: " + completedOn + " -> " + chosen
+                + " | " + reason
+                + " | turbidity=" + fmt(ctx.turbidityScore)
+                + " noise=" + fmt(ctx.noiseScore));
+        return chosen;
+    }
+
     // =======================================================================
     // Layer 5: feedback from the experts.
     // =======================================================================

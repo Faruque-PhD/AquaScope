@@ -11,7 +11,7 @@
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/myview"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content">
+        android:layout_height="match_parent">
 
         <com.jjoe64.graphview.GraphView
             android:id="@+id/graphProd"
@@ -116,11 +116,15 @@
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toBottomOf="@id/switch_ml_moe" />
 
+        <!--        spinner3 (the legacy Ns control) is deliberately NOT referenced here.
+            A Group applies its own visibility to every id it lists, and the default
+            is VISIBLE, which would override spinner3's android:visibility="gone"
+            and drop an extra dropdown on top of the ExpMode row. -->
         <androidx.constraintlayout.widget.Group
             android:id="@+id/acoustic_group"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            app:constraint_referenced_ids="spinner,spinner2,spinner3,spinner4,spinner5,spinnerCB" />
+            app:constraint_referenced_ids="spinner,spinner2,spinner4,spinner5,spinnerCB" />
 
         <androidx.constraintlayout.widget.Group
             android:id="@+id/optical_group"
@@ -196,7 +200,7 @@
             android:gravity="center"
             android:text=""
             android:textSize="40dp"
-            app:layout_constraintTop_toTopOf="parent" />
+            app:layout_constraintTop_toBottomOf="@id/textview_moe_status" />
 
 
         <!--        <ImageView-->
@@ -1248,6 +1252,23 @@
             app:layout_constraintBottom_toBottomOf="@+id/textViewCB"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintTop_toTopOf="@+id/textViewCB" />
+
+        <TextView
+            android:id="@+id/textViewSymbolMs"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Symbol ms"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/textViewCB" />
+
+        <Spinner
+            android:id="@+id/spinnerSymbolMs"
+            android:layout_width="206dp"
+            android:layout_height="30dp"
+            app:layout_constraintBottom_toBottomOf="@+id/textViewSymbolMs"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toTopOf="@+id/textViewSymbolMs" />
 
         <TextView
             android:id="@+id/fishExist"

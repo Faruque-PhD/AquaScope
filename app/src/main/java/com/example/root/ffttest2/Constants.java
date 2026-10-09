@@ -93,6 +93,41 @@ public class Constants {
     public static ListenableFuture<ProcessCameraProvider> cameraProviderFuture;
     public static Bitmap currentCameraCapture;
     /**
+     * When true the optical send path transmits a short known byte pattern instead
+     * of an image payload.
+     *
+     * <p>Set from the {@code optical_link_check} launch extra so the physical link
+     * can be exercised from adb:
+     *
+     * <pre>adb shell am start -n com.example.aquascope/com.example.root.ffttest2.MainActivity \
+     *     --ez optical_link_check true</pre>
+     *
+     * <p>This exists because a 4096-codebook image is ~295 seconds (984 symbols
+     * at 300 ms) against a measured 9 fps receiver, which is far too slow to
+     * iterate on while getting the camera aimed and the threshold tuned. A link
+     * check runs in ~19 seconds through the identical framing, so a failed
+     * attempt costs a twentieth of the time. Shortening the symbol is not a way
+     * out: at 9 fps a symbol is only 2.7 samples long, and 120 ms already took
+     * that to 1.1, which the demodulator could not resolve.
+     */
+    public static boolean opticalLinkCheck = false;
+    /**
+     * Whether an armed optical receiver takes the camera on its own, dropping the
+     * preview and the capture use case for the duration of the receive.
+     *
+     * <p>Measured on an SM-A346E: it makes no difference. The steady-state rate
+     * is 9.0 fps with the camera to itself and 9.0 fps with preview and capture
+     * bound alongside, because the limit is the camera's auto-exposure interval,
+     * not the use-case configuration (the analyzer itself used 0.4 ms of a 112 ms
+     * frame). So the default keeps the viewfinder and the shutter available while
+     * armed, and the flag exists only so the comparison can be repeated on a
+     * device where the outcome might differ.
+     *
+     * <pre>adb shell am start -n com.example.aquascope/com.example.root.ffttest2.MainActivity \
+     *     --ez optical_analysis_only true</pre>
+     */
+    public static boolean opticalAnalysisOnly = false;
+    /**
      * True once the user has clicked the shutter in the current session. The
      * end-to-end send paths require a fresh capture rather than silently falling
      * back to a preloaded test image, which is what previously made the app send
@@ -207,6 +242,45 @@ public static boolean useMLMoE = false;
     public static int gap_from_spinner = 0; // default test mode gap is 0
 
     public static String codebookSize = "4096"; // default 4096, 256, 1024 and 4096
+
+    /**
+     * OOK symbol period for the optical flash link, in milliseconds. The value a
+     * user (or the {@code --ei optical_symbol_ms} launch extra) selects in the
+     * app. Picked from {@link #OPTICAL_SYMBOL_MS_OPTIONS} so the sender and
+     * receiver can never disagree beyond the shared grid, and the receiver's
+     * demodulator searches that same grid rather than trusting the nominal.
+     *
+     * <p>Why not a single fast value? A symbol needs at least two camera frames,
+     * and the frame rate is set by the auto-exposure cycle, which depends on the
+     * scene: a bright laboratory sustains 26 fps, a dim one 9 fps. So 300 ms is
+     * right at 9 fps (2.7 samples) and unnecessarily slow at 26 fps (7.8
+     * samples), where the same safety margin allows 80-120 ms. The receiver
+     * decodes whatever the sender actually transmitted via the grid search, so
+     * the two ends may even choose differently and still link.
+     */
+    public static volatile int opticalSymbolDurationMs =
+            FlashTransmitter.SYMBOL_DURATION_MS;
+
+    /** The values {@link #opticalSymbolDurationMs} may take, sender and receiver. */
+    public static final int[] OPTICAL_SYMBOL_MS_OPTIONS = {80, 100, 120, 150, 200, 300};
+
+    /**
+     * Snap any requested symbol duration onto the shared grid.
+     *
+     * @return the option closest to the request, clamped to the grid bounds.
+     */
+    public static int snapSymbolDurationMs(int requested) {
+        int best = OPTICAL_SYMBOL_MS_OPTIONS[0];
+        int bestDiff = Integer.MAX_VALUE;
+        for (int o : OPTICAL_SYMBOL_MS_OPTIONS) {
+            int d = Math.abs(o - requested);
+            if (d < bestDiff) {
+                bestDiff = d;
+                best = o;
+            }
+        }
+        return best;
+    }
 
     public static Map<Integer, Integer> cb_1024_to_256 = null;
     public static Map<Integer, Integer> cb_256_to_1024 = null;
@@ -329,6 +403,16 @@ public static boolean useMLMoE = false;
 
     // Communication medium selection
     public static CommMedium currentMedium = CommMedium.ACOUSTIC;
+    /**
+     * When true a completed transmission flips {@link #currentMedium} to the other
+     * channel, so consecutive sends alternate between acoustic and optical.
+     *
+     * <p>This is deliberately a simple, deterministic stepping stone rather than
+     * the full {@link MoE} router, which is implemented but unwired. Off by
+     * default: nothing changes until the operator turns the MoE toggle on, so the
+     * existing single-medium behaviour stays exactly as it was.
+     */
+    public static boolean moeEnabled = false;
     // Environment metrics
     public static float ambientLightLux = 0f;
     public static float opticalAttenuation = 0f;
@@ -934,6 +1018,8 @@ public static boolean useMLMoE = false;
         sw1.setText(Constants.user.toString());
         sw1.setChecked(Constants.user.equals(User.Alice));
         Constants.sw2.setEnabled(!sw1.isChecked());
+        Constants.opticalSymbolDurationMs = Constants.snapSymbolDurationMs(
+                prefs.getInt("optical_symbol_ms", Constants.opticalSymbolDurationMs));
 
 //        if (Constants.user.equals(User.Alice)) {
 //            Constants.gview3.setVisibility(View.GONE);

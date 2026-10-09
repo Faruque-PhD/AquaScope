@@ -30,8 +30,18 @@ public final class ContextVector {
 
     private static volatile ContextVector current = new ContextVector(0f, 0f, 0f, 0f);
 
+    /**
+     * Publish a new snapshot. Logged rather than silent, because every consumer
+     * of this class sits on a decision path: until the sensor wiring landed, the
+     * vector was never written at all and nothing said so - the router simply
+     * read (0, 0) forever, and every veto built on top of it stayed dead code.
+     */
     public static void publish(ContextVector v) {
         current = v;
+        Utils.logd("ContextVector: turbidity=" + v.turbidityScore
+                + " noise=" + v.noiseScore
+                + " luminance=" + v.meanLuminance
+                + " laplacian=" + v.laplacianVariance);
     }
 
     public static ContextVector current() {

@@ -1,7 +1,5 @@
 package com.example.root.ffttest2;
 
-import static android.Manifest.*;
-
 import android.Manifest;
 import android.app.Activity;
 import android.app.NotificationManager;
@@ -30,12 +28,6 @@ import android.text.method.ScrollingMovementMethod;
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
-import android.widget.RadioGroup;
-import android.widget.RadioButton;
-import android.widget.Switch;
-import android.widget.LinearLayout;
-import android.widget.TextView;
-import android.widget.CompoundButton;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.AdapterView;
@@ -49,6 +41,7 @@ import android.widget.ProgressBar;
 import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
+import android.widget.RadioGroup;
 import android.graphics.Color;
 import android.os.Handler;
 import android.os.Looper;
@@ -107,7 +100,7 @@ import java.util.Map;
 public class MainActivity extends AppCompatActivity implements SensorEventListener {
 
     // ********************************** Start App Variable Definition **********************************
-    String[] perms = new String[]{permission.RECORD_AUDIO, permission.WRITE_EXTERNAL_STORAGE, permission.READ_EXTERNAL_STORAGE, permission.CAMERA, "android.permission.FLASHLIGHT", permission.BODY_SENSORS};
+    String[] perms = new String[]{Manifest.permission.RECORD_AUDIO, Manifest.permission.WRITE_EXTERNAL_STORAGE, Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.CAMERA};
 
     private static SensorManager sensorManager;
     private Sensor accelerometer;
@@ -116,17 +109,13 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     static boolean started=false;
 
     // these can be put into constants
-    private static ImageView mImageView;
-    private static ImageView mImageView2;
-    private boolean cameraPreviewRequested;
-    private OpticalReceiver opticalReceiver;
+    public static ImageView mImageView;
+    public static ImageView mImageView2;
 
     private Button runModelButton;
     private ProgressBar mProgressBar;
-    public static Bitmap mBitmap = null;
+    private Bitmap mBitmap = null;
     private Module mModule = null;
-    // MoE router instance for acoustic/optical transmission decision
-    private static MoE moeRouter = null;
 
     private int currentIndex = 0;
     private String defaultModelName = "lite_optimized_seg_240p.ptl";
@@ -317,13 +306,13 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
                 // set up embedding bytes
                 // can be more elegant, e.g., use on change
-                if (Constants.codebookSize.equals("1024")) {
+                if (Constants.codebookSize == "1024") {
                     Constants.EmbeddindBytes = 80;
                     Constants.maxbits = 640;
-                } else if (Constants.codebookSize.equals("256")) {
+                } else if (Constants.codebookSize == "256") {
                     Constants.EmbeddindBytes = 64;
                     Constants.maxbits = 512;
-                } else if (Constants.codebookSize.equals("4096")) {
+                } else if (Constants.codebookSize == "4096") {
                     Constants.EmbeddindBytes = 96;
                     Constants.maxbits = 768;
                 }
@@ -629,27 +618,177 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 //            }
 
             if (Constants.newEncoder == null) {
-//                Constants.newEncoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myEncode_vulkan_optimized.ptl"), null, Device.VULKAN);
-                Constants.newEncoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myEncode_optimized.ptl"));
-
+                Constants.newEncoder = loadCodecModel("myEncode_optimized.ptl");
             }
 
             if (Constants.newDecoder == null) {
-//                Constants.newDecoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myDecode_vulkan_optimized.ptl"), null, Device.VULKAN);
-                Constants.newDecoder = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myDecode_normal.ptl"));
-
+                Constants.newDecoder = loadCodecModel("myDecode_normal.ptl");
             }
 //
-            if (Constants.newTransformer == null) {
-//                Constants.newTransformer = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myRecover_vulkan_optimized.ptl"), null, Device.VULKAN);
-                Constants.newTransformer = LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), "myRecover_optimized.ptl"));
-
-            }
+//            The recover transformer is deliberately NOT loaded here. It is 709 MB
+//            and only the receiver ever touches it (Utils.transformer_recover), so
+//            loading it eagerly made startup allocate encoder + decoder + recover
+//            together. On a 2.5 GB emulator that put the process into a
+//            kill/restart loop before the UI ever settled. Utils.transformer_recover
+//            now loads it on first use via ensureRecoverLoaded().
+//            if (Constants.newTransformer == null) {
+//                Constants.newTransformer = loadCodecModel("myRecover_optimized.ptl");
+//            }
 
         } catch (Exception e) {
             e.printStackTrace();
         }
 
+    }
+
+    /**
+     * Load one codec checkpoint, reporting a failure instead of propagating it.
+     *
+     * These three used to sit in one try/catch, so the first missing file aborted
+     * the block and left every model null with nothing but a stack trace in
+     * logcat. Loading each independently keeps the remaining models available and
+     * makes the missing one obvious.
+     *
+     * @return the loaded module, or null when the checkpoint is not installed.
+     */
+    private Module loadCodecModel(String fileName) {
+        try {
+            Utils.log("Loading codec model " + fileName);
+            return LiteModuleLoader.load(Utils.assetFilePath(getApplicationContext(), fileName));
+        } catch (Exception e) {
+            Utils.log("Codec model " + fileName + " could not be loaded: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * True when the generative codec can turn an image into tokens.
+     */
+    private static boolean isCodecReady() {
+        return Constants.newEncoder != null && Constants.newDecoder != null;
+    }
+
+    /** Show a short actionable message on the UI thread, at most once per repeat. */
+    static void showUserMessage(final Activity av, final String message) {
+        if (av == null) {
+            return;
+        }
+        // startMethod runs on every onResume and onstop, so an unfixable condition
+        // such as a missing codec re-fires constantly. Replacing a toast that is
+        // still queued makes the framework log "Toast already killed", so collapse
+        // repeats inside the window instead.
+        long now = SystemClock.elapsedRealtime();
+        if (message.equals(lastUserMessage) && now - lastUserMessageAt < TOAST_REPEAT_WINDOW_MS) {
+            Utils.log("showUserMessage: repeat suppressed: " + message);
+            return;
+        }
+        lastUserMessage = message;
+        lastUserMessageAt = now;
+        av.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Toast.makeText(av, message, Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
+    /** Minimum gap between two identical toasts, so repeats do not spam. */
+    private static final long TOAST_REPEAT_WINDOW_MS = 15000;
+    private static String lastUserMessage = null;
+    private static long lastUserMessageAt = 0L;
+
+    /**
+     * Kept so {@link #autoSwitchMedium} can detach it while it moves the radio.
+     * Needed because {@code RadioGroup.check()} does not make one clean
+     * transition: it fires the group listener an extra time with the id that was
+     * checked <em>before</em> the change, so a programmatic move from optical to
+     * acoustic produced three callbacks - optical, acoustic, acoustic - each of
+     * which armed and re-bound the receive side. Detaching for the duration
+     * leaves one transition, driven explicitly by the caller.
+     */
+    private static RadioGroup.OnCheckedChangeListener mediumListener;
+
+    /**
+     * Show which medium is in charge and whether the router is allowed to change
+     * it. The label does not attempt to say why the medium is what it is - that
+     * is in the log, where {@code MoE auto-switch target} carries the sensor
+     * scores behind the decision.
+     */
+    private void updateMoeStatus() {
+        TextView status = findViewById(R.id.textview_moe_status);
+        if (status == null) {
+            return;
+        }
+        String mode = Constants.moeEnabled ? "auto" : "manual";
+        status.setText("Medium: " + Constants.currentMedium + " (" + mode + ")");
+    }
+
+    /**
+     * Hand the next transmission to the other channel, if auto-switching is on.
+     *
+     * <p>Called when a transmission has finished, so a send on one medium
+     * immediately arms the other. The radio group is updated rather than only
+     * mutating {@link Constants#currentMedium}, because the receiver side is
+     * driven from the radio listener ({@code applyMediumToReceiver}); changing the
+     * flag alone would leave the demodulator and microphone as they were.
+     *
+     * <p>Silent when auto-switching is off, so this can be called unconditionally
+     * from every task completion without changing default behaviour.
+     */
+    public static void autoSwitchMedium(Constants.CommMedium completedOn) {
+        if (!Constants.moeEnabled) {
+            return;
+        }
+        // The router picks the next medium from the live sensor scores rather
+        // than flipping blindly: turbidity vetoes optical, noise vetoes acoustic,
+        // and with neither active it alternates.
+        final Constants.CommMedium next = MoE.autoSwitchTarget(completedOn);
+        // Safe from any thread: the receive-side wiring all happens on the UI
+        // thread below, because it touches views and the radio listener.
+        Constants.currentMedium = next;
+        if (av != null) {
+            PreferenceManager.getDefaultSharedPreferences(av)
+                    .edit().putString("medium", next.toString()).apply();
+        }
+        Runnable apply = new Runnable() {
+            @Override
+            public void run() {
+                RadioGroup group = (av == null) ? null : av.findViewById(R.id.radio_medium);
+                if (group != null) {
+                    // Move the radio with the listener detached: RadioGroup fires
+                    // an extra callback carrying the previously-checked id, which
+                    // would arm and re-bind the receive side twice for a single
+                    // switch. The work the listener would have done is then done
+                    // once, explicitly, below.
+                    group.setOnCheckedChangeListener(null);
+                    try {
+                        group.check(next == Constants.CommMedium.OPTICAL
+                                ? R.id.radio_optical : R.id.radio_acoustic);
+                    } finally {
+                        group.setOnCheckedChangeListener(mediumListener);
+                    }
+                }
+                applyMediumToReceiver();
+                updateMoeStatusOnUi();
+            }
+        };
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            apply.run();
+        } else if (av != null) {
+            av.runOnUiThread(apply);
+        }
+        Utils.log("MoE auto-switch: " + completedOn + " transmission finished, next medium = " + next);
+    }
+
+    /** Refresh the status label; must run on the UI thread. */
+    private static void updateMoeStatusOnUi() {
+        if (av == null) {
+            return;
+        }
+        TextView status = av.findViewById(R.id.textview_moe_status);
+        if (status != null) {
+            status.setText("Medium: " + Constants.currentMedium + " (auto)");
+        }
     }
 
     private void load_all_file_paths(AssetManager assetManager) {
@@ -700,6 +839,31 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        // Debug hook: a link check replaces the image payload with a short known
+        // pattern so the optical link can be exercised from adb without waiting
+        // out a full image burst. Absent by default, so nothing changes unless it
+        // is asked for explicitly.
+        if (getIntent() != null && getIntent().getBooleanExtra("optical_link_check", false)) {
+            Constants.opticalLinkCheck = true;
+            Utils.log("optical_link_check launch extra set: optical sends will use the short pattern");
+        }
+        // Companion flag: whether an armed receiver takes the camera on its own.
+        // Checked with hasExtra so that "false" is distinguishable from absent,
+        // which matters because the default is true.
+        if (getIntent() != null && getIntent().hasExtra("optical_analysis_only")) {
+            Constants.opticalAnalysisOnly = getIntent().getBooleanExtra("optical_analysis_only", true);
+            Utils.log("optical_analysis_only launch extra: " + Constants.opticalAnalysisOnly);
+        }
+        // Debug hook: drive the optical symbol duration from adb without touching
+        // the on-screen spinner. Snapped onto the shared grid so sender and
+        // receiver can never disagree beyond it, and the receiver's demodulator
+        // searches the whole grid anyway.
+        if (getIntent() != null && getIntent().hasExtra("optical_symbol_ms")) {
+            int ms = getIntent().getIntExtra("optical_symbol_ms", Constants.opticalSymbolDurationMs);
+            Constants.opticalSymbolDurationMs = Constants.snapSymbolDurationMs(ms);
+            Utils.log("optical_symbol_ms launch extra: " + ms + " -> " + Constants.opticalSymbolDurationMs);
+        }
 
         // request permission
         ActivityCompat.requestPermissions(this,
@@ -776,6 +940,24 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         Utils.logd("oncreate end");
     }
 
+    private void bindCameraIfPermitted() {
+        if (Constants.cameraProviderFuture == null) {
+            return;
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            Utils.logd("camera permission not granted yet, camera will be bound once it is granted");
+            return;
+        }
+        Constants.cameraProviderFuture.addListener(() -> {
+            try {
+                ProcessCameraProvider cameraProvider = Constants.cameraProviderFuture.get();
+                CameraHelper.bindCamera(cameraProvider, this, mImageView2);
+            } catch (ExecutionException | InterruptedException e) {
+                Utils.logd("Error getting camera provider: " + e.getMessage());
+            }
+        }, ContextCompat.getMainExecutor(this));
+    }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -801,8 +983,13 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                         requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 1234);
                     }
                 }
+                else if (permission.equals(Manifest.permission.CAMERA)) {
+                    // the camera was bound in uiSetup before this permission existed, so bind it now
+                    if (grantResult == PackageManager.PERMISSION_GRANTED) {
+                        bindCameraIfPermitted();
+                    }
+                }
             }
-            startCameraPreviewIfPermitted();
             // remove to solve double sendchirpasynctask
 //            if (audioGranted && writeGranted) {
 //                Constants.user  = Constants.User.Bob;
@@ -830,9 +1017,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         super.onPause();
         Utils.logd("onpause");
         sensorManager.unregisterListener(this);
-        // Release the microphone held by the noise analyzer, otherwise the
-        // next audio pipeline in the session cannot open AudioRecord.
-        SensorFusion.get(this).stop();
         stopMethod();
     }
 
@@ -842,11 +1026,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME);
         sensorManager.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_GAME);
         FullScreencall();
-        startCameraPreviewIfPermitted();
-        // Layer 1 of the MoE gating network: keep the turbidity and noise scores
-        // current for as long as the activity is in the foreground, so a routing
-        // decision always has fresh environment data.
-        SensorFusion.get(this).start();
 
         Constants.user  = Constants.User.Bob;
         if (started == false) {
@@ -899,108 +1078,292 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 //        startWrapper();
     }
 
-    public static void startMethod(Activity av) {
-        started = true;
-        Constants.work = true;
-
-        String formattedNow = getFormattedNow();
-
-        if (Constants.expMode != Constants.Experiment.dataCollection) {
-            Constants.ts = System.currentTimeMillis();
-            FileOperations.mkdir(av, Utils.getDirName());
-            Constants.tv6.setText(Utils.trimmed_ts());
+    /**
+     * Resolve the bitmap an optical transmission should carry.
+     *
+     * Mirrors the per-mode choices SendChirpAsyncTask makes for the acoustic path:
+     * end2endCam sends the frame the Camera button captured, testExp sends the
+     * preloaded base image, and the remaining modes send the first preloaded test
+     * image. This deliberately does NOT gate on a "fresh capture" flag, because
+     * CameraHelper.takePicture2 only assigns Constants.currentCameraCapture and
+     * such a flag would never be set, silently sending the base image instead.
+     */
+    public static Bitmap resolveSendBitmap() {
+        switch (Constants.expMode) {
+            case end2endCam:
+                return Constants.currentCameraCapture;
+            case end2endTest:
+            case dataCollection:
+                if (Constants.testEnd2EndImageBitmaps != null
+                        && !Constants.testEnd2EndImageBitmaps.isEmpty()) {
+                    return Constants.testEnd2EndImageBitmaps.get(0);
+                }
+                return Constants.testExpBitmap;
+            case testExp:
+            default:
+                return Constants.testExpBitmap;
         }
-
-        // Resolve the bitmap first: the camera modes must have a fresh capture
-        // before any routing happens, so we never route a transmission we cannot
-        // actually send.
-        Bitmap sendBitmap = resolveSendBitmap();
-        if (sendBitmap == null) {
-            Utils.log("startMethod aborted: no image to send for mode " + Constants.expMode);
-            return;
-        }
-
-        // Feed the sensor fusion pipeline with the exact frame being sent so the
-        // turbidity score reflects this image rather than an earlier tick.
-        SensorFusion fusion = SensorFusion.get(av);
-        ContextVector ctx = fusion.analyseNow(sendBitmap);
-
-        // Layer 2-4 of the MoE gating network. Image transmissions are normal
-        // priority, so they run the full scoring path.
-        MoE.Decision decision = MoE.decide(Constants.currentMedium, MoE.MessageType.NORMAL);
-        Utils.log("startMethod routing: " + decision
-                + " | frame turbidity=" + ctx.turbidityScore + " noise=" + ctx.noiseScore);
-
-        // testExp keeps the classic acoustic pipeline with its hard-coded test bitmap.
-        if (Constants.expMode == Constants.Experiment.testExp
-                && decision.medium == Constants.CommMedium.OPTICAL) {
-            Utils.log("testExp is acoustic-only; forcing the acoustic medium");
-            decision = new MoE.Decision(Constants.CommMedium.ACOUSTIC, false,
-                    decision.highUncertainty, decision.acousticScore, decision.opticalScore,
-                    "testExp is acoustic-only");
-        }
-
-        // Bob is the receiver role; there is no optical receive/feedback pipeline yet,
-        // so never auto-launch an optical burst on Bob (e.g. on every onResume).
-        if (Constants.user.equals(Constants.User.Bob)
-                && decision.medium == Constants.CommMedium.OPTICAL) {
-            Utils.log("Optical receiver not implemented; skipping transmission as Bob");
-            return;
-        }
-
-        // An emergency message, or a fully vetoed environment, goes out on both
-        // channels. Only Alice transmits here; Bob still only receives.
-        if (decision.broadcastBoth && Constants.user.equals(Constants.User.Alice)) {
-            Utils.log("MoE requested a dual-channel broadcast; sending acoustic then optical");
-            Constants.task = new SendChirpAsyncTask(av, Constants.mattempts, Constants.sendButton,
-                    Constants.defaultBackground, Constants.testEnd2EndImageBitmaps,
-                    mImageView, mImageView2, formattedNow);
-            Constants.task.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
-            Constants.task = new SendOpticalAsyncTask(av, sendBitmap);
-            Constants.task.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
-            return;
-        }
-
-        if (decision.medium == Constants.CommMedium.ACOUSTIC) {
-            Constants.task = new SendChirpAsyncTask(av, Constants.mattempts, Constants.sendButton,
-                    Constants.defaultBackground, Constants.testEnd2EndImageBitmaps,
-                    mImageView, mImageView2, formattedNow);
-        } else {
-            Constants.task = new SendOpticalAsyncTask(av, sendBitmap);
-        }
-        Constants.task.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
-    }
-
-    private static String getFormattedNow() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            LocalDateTime now = LocalDateTime.now();
-            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
-            return now.format(formatter);
-        }
-        return "not_available";
     }
 
     /**
-     * The image to transmit.
+     * Bring the receive side in line with the medium switch, without starting a
+     * transmission.
      *
-     * The end-to-end modes (end2endTest, end2endCam, dataCollection) are camera
-     * modes: they must transmit the frame the user actually clicked, so they return
-     * only a fresh capture and refuse to substitute a preloaded asset. Returning a
-     * test image here is what made the app transmit the wrong frame in these modes.
+     * <p>Only the receiver role is touched. In the Alice/sender role the medium is
+     * applied by {@link #startMethod(Activity)}, which also encodes and sends;
+     * calling that from the switch would fire a burst nobody asked for.
      *
-     * testExp is the one non-camera mode and keeps using its fixed test bitmap.
-     *
-     * @return the bitmap to send, or null when no fresh capture exists.
+     * <p>Switching to optical cancels the acoustic task. {@link SendChirpAsyncTask}
+     * is the acoustic listen loop, so leaving it alive means the microphone stays
+     * open on a device the user has told us to use light only.
      */
-    public static Bitmap resolveSendBitmap() {
-        if (Constants.expMode == Constants.Experiment.testExp) {
-            return Constants.testExpBitmap;
+    private static void applyMediumToReceiver() {
+        if (Constants.user == null || !Constants.user.equals(Constants.User.Bob)) {
+            return;
         }
-        if (Constants.hasFreshCameraCapture && Constants.currentCameraCapture != null) {
-            return Constants.currentCameraCapture;
+        if (Constants.currentMedium == Constants.CommMedium.OPTICAL) {
+            stopAcousticTask("medium switched to optical");
+            CameraHelper.ensureOpticalReceiverArmed();
+        } else {
+            CameraHelper.disarmOpticalReceiver();
+            if (!started) {
+                startAcousticTask(MainActivity.av);
+            }
         }
-        Utils.log("No fresh camera capture for this mode; refusing to send a preloaded image");
-        return null;
+    }
+
+    /**
+     * Stop the acoustic listen loop if one is running.
+     *
+     * <p>{@code started} is cleared as well, otherwise {@link #startMethod(Activity)}
+     * would believe the receiver is already listening and refuse to open the
+     * microphone again when the user switches back to acoustic.
+     */
+    private static void stopAcousticTask(String reason) {
+        if (!started) {
+            return;
+        }
+        AsyncTask<?, ?, ?> task = Constants.task;
+        if (task != null) {
+            task.cancel(true);
+            Constants.task = null;
+        }
+        started = false;
+        Constants.work = false;
+        Utils.log("stopped acoustic listen loop (" + reason + ")");
+    }
+
+    /**
+     * Create and launch the acoustic SendChirpAsyncTask.
+     *
+     * The same task object carries both directions: its Alice branch transmits and
+     * its Bob branch listens and decodes. So the receiver needs this launched too,
+     * otherwise it never opens the microphone.
+     */
+    private static void startAcousticTask(Activity av) {
+        started = true;
+        Constants.ts = System.currentTimeMillis();
+        Constants.work = true;
+        String formattedNow;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            LocalDateTime now = LocalDateTime.now();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+            formattedNow = now.format(formatter);
+        } else {
+            formattedNow = "not_available";
+        }
+        Constants.task = new SendChirpAsyncTask(av, Constants.mattempts, Constants.sendButton,
+                Constants.defaultBackground, Constants.testEnd2EndImageBitmaps, mImageView,
+                mImageView2, formattedNow);
+        Constants.task.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+    }
+
+    /**
+     * Decode a token array recovered by the optical demodulator.
+     *
+     * This is deliberately the same chain the acoustic receiver runs in
+     * SendChirpAsyncTask: recover with the transformer, then decode the image
+     * both before and after recovery. Nothing optical-specific happens here, so
+     * an optically received image is reconstructed by exactly the same codebook
+     * path as an acoustically received one.
+     *
+     * Runs off the UI thread because both the transformer and the decoder are
+     * multi-second forward passes, and ImageAnalysis calls this straight from the
+     * camera callback.
+     */
+    public static void decodeOpticalTokens(final long[] embeddings) {
+        if (embeddings == null || embeddings.length == 0) {
+            Utils.log("Optical: no tokens to decode");
+            return;
+        }
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    long[] prediction = Utils.transformer_recover(embeddings);
+                    // before recover
+                    Utils.decode_image_receiver(embeddings, mImageView, true);
+                    // after recover
+                    Utils.decode_image_receiver(prediction, mImageView2, false);
+                    Utils.log("Receiver_Latency_Str: " + Constants.Receiver_Latency_Str);
+                    showUserMessage(av, "Optical image received");
+                } catch (Throwable t) {
+                    Utils.log("Optical decode failed: " + t);
+                    showUserMessage(av, "Optical decode failed: " + t);
+                }
+            }
+        }, "OpticalDecode").start();
+    }
+
+    /**
+     * Handed to the demodulator; kept static so CameraHelper can attach it
+     * without holding a reference to the Activity.
+     */
+    public static final OpticalReceiver.Listener OPTICAL_TOKENS_LISTENER =
+            new OpticalReceiver.Listener() {
+                @Override
+                public void onOpticalTokensReceived(long[] tokens, boolean[] tokenValid, int errorCount) {
+                    Utils.log("Optical: " + tokens.length + " tokens received, "
+                            + errorCount + " symbol errors; decoding via the shared codebook path");
+                    // A link check is a short pattern, not an image, so its tokens
+                    // cannot build a 4096-value embedding. Report what actually
+                    // arrived so alignment and threshold can be judged, and do not
+                    // push it through the image decoder, which would only fail on
+                    // the length check and bury the useful part.
+                    if (Constants.opticalLinkCheck) {
+                        StringBuilder got = new StringBuilder();
+                        for (long t : tokens) {
+                            if (got.length() > 0) {
+                                got.append(' ');
+                            }
+                            got.append(t);
+                        }
+                        Utils.log("Optical link check received tokens: [" + got + "]");
+                        return;
+                    }
+                    decodeOpticalTokens(tokens);
+                }
+            };
+
+    public static void startMethod(Activity av) {
+        // Manual medium veto. The radio group decides which channel is allowed;
+        // the MoE is not consulted. Both media are never used at once, so each
+        // transmission carries exactly one encode.
+        Constants.CommMedium medium = Constants.currentMedium;
+
+        // Bob is the receiver role and never transmits. This runs on every
+        // onResume, so an optical selection on Bob must not launch a burst.
+        if (Constants.user != null && Constants.user.equals(Constants.User.Bob)) {
+            // The optical receiver only needs the camera when optical is the
+            // selected medium, so tie the demodulator to the manual switch rather
+            // than leaving it bound forever.
+            if (medium == Constants.CommMedium.OPTICAL) {
+                Utils.log("Bob is the receiver; optical selection means receive-only, not transmit");
+                CameraHelper.ensureOpticalReceiverArmed();
+                // Nothing else: the acoustic loop below must not run on an optical
+                // receiver. It opens the microphone and logs a correlation value
+                // every few hundred ms, which both contradicts the medium the user
+                // picked and floods the log so fast that the optical diagnostics
+                // scroll out of the buffer.
+            } else {
+                CameraHelper.disarmOpticalReceiver();
+                Utils.log("Bob is the receiver; starting the acoustic listen loop");
+                // The receiver must still get a SendChirpAsyncTask: that task
+                // carries the acoustic listen/decode loop in its Bob branch.
+                // Returning early without creating one leaves the receiver silent,
+                // which looked identical to "the base image is never received".
+                if (!started) {
+                    startAcousticTask(av);
+                }
+            }
+            return;
+        }
+
+        // Refuse to start a transmission the codec cannot encode. Without the
+        // encoder the task produces a zero-length token array, which reaches
+        // decode_image and used to abort the process with "Inconsistent data
+        // capacity:0 and shape number elements:64".
+        if (!isCodecReady()) {
+            Utils.log("startMethod aborted: generative codec not loaded (encoder="
+                    + Constants.newEncoder + ", decoder=" + Constants.newDecoder + ")");
+            // The weights are not shipped in the repo, so spell out the fix rather
+            // than leaving the user with a silent abort.
+            String push = "adb push <dir>/{myEncode_optimized.ptl,myDecode_normal.ptl,"
+                    + "myRecover_optimized.ptl} /data/local/tmp/ && adb shell run-as "
+                    + (av == null ? "com.example.aquascope" : av.getPackageName())
+                    + " cp /data/local/tmp/myEncode_optimized.ptl files/ && adb shell run-as "
+                    + (av == null ? "com.example.aquascope" : av.getPackageName())
+                    + " cp /data/local/tmp/myDecode_normal.ptl files/ && adb shell run-as "
+                    + (av == null ? "com.example.aquascope" : av.getPackageName())
+                    + " cp /data/local/tmp/myRecover_optimized.ptl files/";
+            Utils.log("Codec checkpoints missing. Install them with: " + push);
+            showUserMessage(av, "Codec checkpoints missing. Install the .ptl files into the app's "
+                    + "filesDir (see logcat for the adb command), then restart the app.");
+            return;
+        }
+
+        // Resolve the image before routing, so nothing is launched that cannot be
+        // sent. A link check is exempt: it transmits a known pattern rather than
+        // an image, so requiring the shutter first would only get in the way of
+        // checking the link.
+        Bitmap sendBitmap = resolveSendBitmap();
+        if (sendBitmap == null && !Constants.opticalLinkCheck) {
+            Utils.log("startMethod aborted: no image to send for mode " + Constants.expMode
+                    + " - press CAMERA first to capture the frame");
+            // The most common reason a "Send" press looks dead. Without the
+            // message the operator is left with "the app stopped transmitting"
+            // when it simply has nothing to send, so say so instead.
+            showUserMessage(av, "No image to send: press CAMERA first, then Send.");
+            return;
+        }
+
+        if (medium == Constants.CommMedium.OPTICAL) {
+            Utils.log("startMethod: manual veto selected OPTICAL; sending on the flash channel only");
+            started = true;
+            Constants.work = true;
+            Constants.ts = System.currentTimeMillis();
+            Constants.task = new SendOpticalAsyncTask(av, sendBitmap);
+            Constants.task.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+            return;
+        }
+
+        Utils.log("startMethod: manual veto selected ACOUSTIC; sending on the acoustic channel only");
+        if (Constants.expMode == Constants.Experiment.dataCollection) {
+            started = true;
+            Constants.work = true;
+            String formattedNow = "";
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                LocalDateTime now = LocalDateTime.now();
+                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+                formattedNow = now.format(formatter);
+            } else {
+                formattedNow = "not_available";
+            }
+            Constants.task = new SendChirpAsyncTask(av, Constants.mattempts, Constants.sendButton, Constants.defaultBackground, Constants.testEnd2EndImageBitmaps, mImageView, mImageView2, formattedNow);
+            Constants.task.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+        } else {
+            started = true;
+//            sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_FASTEST);
+//            sensorManager.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_FASTEST);
+
+            Constants.ts = System.currentTimeMillis();
+
+            Constants.work = true;
+            FileOperations.mkdir(av, Utils.getDirName());
+//        FileOperations.writetofile(av, Constants.ts+"", Utils.genName(Constants.SignalType.Timestamp,0)+".txt");
+
+            Constants.tv6.setText(Utils.trimmed_ts());
+            String formattedNow = "";
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                LocalDateTime now = LocalDateTime.now();
+                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+                formattedNow = now.format(formatter);
+            } else {
+                formattedNow = "not_available";
+            }
+            Constants.task = new SendChirpAsyncTask(av, Constants.mattempts, Constants.sendButton, Constants.defaultBackground, Constants.testEnd2EndImageBitmaps, mImageView, mImageView2, formattedNow);
+            Constants.task.executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+        }
     }
 
 
@@ -1521,14 +1884,96 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 //        Constants.frameLayout = findViewById(R.id.frameLayout);
         Constants.preview = findViewById(R.id.previewView);
         Constants.cameraCaptureBtn = findViewById(R.id.cameraCapture);
-        Constants.cameraCaptureBtn.setEnabled(false);
+        Constants.cameraProviderFuture = ProcessCameraProvider.getInstance(this);
+        // binds now if camera permission is already granted, otherwise onRequestPermissionsResult binds later
+        bindCameraIfPermitted();
+
+        //        CameraHelper.startCamera(this, Constants.cameraTextureView, mImageView2);
         Constants.cameraCaptureBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 CameraHelper.takePicture2();
             }
         });
-        startCameraPreviewIfPermitted();
+
+        // Manual medium selection. The radio group is a veto, not a suggestion:
+        // whatever is checked is the only medium a transmission may use. The MoE
+        // is deliberately not consulted here and gets plugged in later.
+        RadioGroup mediumGroup = findViewById(R.id.radio_medium);
+        if (mediumGroup != null) {
+            // Publish the current selection before any listener can fire, so a
+            // later onResume/startMethod picks the same medium this launch would
+            // have. A fresh install has no saved choice and keeps the XML default.
+            String savedMedium = PreferenceManager.getDefaultSharedPreferences(this)
+                    .getString("medium", "");
+            if (savedMedium.equals(Constants.CommMedium.OPTICAL.toString())) {
+                Constants.currentMedium = Constants.CommMedium.OPTICAL;
+            } else if (savedMedium.equals(Constants.CommMedium.ACOUSTIC.toString())) {
+                Constants.currentMedium = Constants.CommMedium.ACOUSTIC;
+            } else {
+                Constants.currentMedium = mediumGroup.getCheckedRadioButtonId() == R.id.radio_optical
+                        ? Constants.CommMedium.OPTICAL
+                        : Constants.CommMedium.ACOUSTIC;
+            }
+            mediumListener = new RadioGroup.OnCheckedChangeListener() {
+                @Override
+                public void onCheckedChanged(RadioGroup group, int checkedId) {
+                    Constants.currentMedium = checkedId == R.id.radio_optical
+                            ? Constants.CommMedium.OPTICAL
+                            : Constants.CommMedium.ACOUSTIC;
+                    // Remember the choice across launches; a manually-selected
+                    // optical receiver must come back up on optical, or the next
+                    // session silently listens on the acoustic default again.
+                    PreferenceManager.getDefaultSharedPreferences(MainActivity.this)
+                            .edit().putString("medium", Constants.currentMedium.toString()).apply();
+                    Utils.log("manual medium selection: " + Constants.currentMedium
+                            + (Constants.moeEnabled
+                            ? " (auto-switch armed, not involved in this change)"
+                            : " (auto-switch off)"));
+                    updateMoeStatus();
+                    // Apply the switch at once rather than waiting for the next
+                    // Ready or onResume. Otherwise a receiver left on acoustic
+                    // keeps the microphone loop running after the user moves to
+                    // optical, and that loop competes for enough CPU to halve the
+                    // camera frame rate the demodulator depends on.
+                    applyMediumToReceiver();
+                }
+            };
+            mediumGroup.setOnCheckedChangeListener(mediumListener);
+            // Match the radio to a restored choice. The listener is detached so a
+            // boot-time restore cannot log or re-apply a "manual selection"; the
+            // radio is already in the state the rest of onCreate/startMethod will
+            // read it as.
+            int wantedId = Constants.currentMedium == Constants.CommMedium.OPTICAL
+                    ? R.id.radio_optical : R.id.radio_acoustic;
+            if (mediumGroup.getCheckedRadioButtonId() != wantedId) {
+                mediumGroup.setOnCheckedChangeListener(null);
+                mediumGroup.check(wantedId);
+                mediumGroup.setOnCheckedChangeListener(mediumListener);
+            }
+            if (!savedMedium.isEmpty()) {
+                Utils.log("saved medium selection restored: " + Constants.currentMedium);
+            }
+        }
+
+        // Turning this on lets each completed transmission hand the next one to
+        // the other channel, unless a sensor veto rules one of them out. Left off
+        // by default so a run stays single-medium until auto-switching is wanted.
+        Switch moeSwitch = findViewById(R.id.switch_ml_moe);
+        if (moeSwitch != null) {
+            moeSwitch.setChecked(Constants.moeEnabled);
+            moeSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+                @Override
+                public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                    Constants.moeEnabled = isChecked;
+                    Utils.log("MoE auto-switch " + (isChecked
+                            ? "enabled; completed transmissions will alternate medium"
+                            : "disabled; medium stays on the manual selection"));
+                    updateMoeStatus();
+                }
+            });
+        }
+        updateMoeStatus();
 
 
         // Resize:
@@ -1719,38 +2164,10 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         Constants.spinner = (Spinner) findViewById(R.id.spinner);
         Constants.spinner2 = (Spinner) findViewById(R.id.spinner2);
         Constants.spinner3 = (Spinner) findViewById(R.id.spinner3);
-        // New UI widgets for MoE routing
-        RadioGroup rgMedium = findViewById(R.id.radio_medium);
-        Constants.currentMedium = Constants.CommMedium.ACOUSTIC;
-        rgMedium.setOnCheckedChangeListener(new RadioGroup.OnCheckedChangeListener() {
-            @Override
-            public void onCheckedChanged(RadioGroup group, int checkedId) {
-                if (checkedId == R.id.radio_acoustic) {
-                    Constants.currentMedium = Constants.CommMedium.ACOUSTIC;
-                } else if (checkedId == R.id.radio_optical) {
-                    Constants.currentMedium = Constants.CommMedium.OPTICAL;
-                }
-                Utils.log("transmission medium = " + Constants.currentMedium);
-            }
-        });
-        Switch swMLMoE = findViewById(R.id.switch_ml_moe);
-        swMLMoE.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                Constants.useMLMoE = isChecked;
-            }
-        });
         Constants.spinner4 = (Spinner) findViewById(R.id.spinner4);
         Constants.spinner5 = (Spinner) findViewById(R.id.spinner5);
         Constants.spinnerCB = (Spinner) findViewById(R.id.spinnerCB);
         Constants.sendButton = (Button) findViewById(R.id.sendbutton);
-        // When the dedicated send button is pressed, use the same startWrapper logic
-        Constants.sendButton.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                startWrapper();
-            }
-        });
         Constants.readyButton = (Button) findViewById(R.id.readyButton);
 
         // when click, pop up a dialog to ask experiment details
@@ -1929,12 +2346,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                     }
                 }
                 Constants.expMode = Constants.Experiment.valueOf(arrayList4.get(position));
-                // Switching mode starts a new session: the previous capture belongs
-                // to the old one, so clear it rather than letting it be sent.
-                Constants.hasFreshCameraCapture = false;
-                Constants.currentCameraCapture = null;
-                MoE.reset();
-                MoEManager.reset();
                 stopMethod();
                 try {
                     Thread.sleep(Constants.spinnerStateChangeSleepTime);
@@ -2006,13 +2417,13 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 Utils.logd("Codebook Size is set to " + Constants.codebookSize);
 
                 // can be more elegant, e.g., use on change
-                if (Constants.codebookSize.equals("1024")) {
+                if (Constants.codebookSize == "1024") {
                     Constants.EmbeddindBytes = 80;
                     Constants.maxbits = 640;
-                } else if (Constants.codebookSize.equals("256")) {
+                } else if (Constants.codebookSize == "256") {
                     Constants.EmbeddindBytes = 64;
                     Constants.maxbits = 512;
-                } else if (Constants.codebookSize.equals("4096")) {
+                } else if (Constants.codebookSize == "4096") {
                     Constants.EmbeddindBytes = 96;
                     Constants.maxbits = 768;
                 } else {
@@ -2020,6 +2431,38 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                     Constants.maxbits = 640;
                 }
             }
+            @Override
+            public void onNothingSelected(AdapterView <?> parent) {
+            }
+        });
+
+        // Symbol duration for the optical flash link. This is the one knob that
+        // directly trades link time against robustness: a symbol must cover at
+        // least two camera frames, and the frame rate is set by the scene's
+        // brightness through auto-exposure. Both ends read the same shared grid,
+        // and the receiver demodulates by searching the grid, so two devices set
+        // differently still decode each other.
+        ArrayList<String> symbolOptions = new ArrayList<>();
+        for (int o : Constants.OPTICAL_SYMBOL_MS_OPTIONS) {
+            symbolOptions.add(String.valueOf(o));
+        }
+        ArrayAdapter<String> symbolAdapter = new ArrayAdapter<String>(this,
+                android.R.layout.simple_spinner_item, symbolOptions);
+        symbolAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        Spinner symbolSpinner = (Spinner) findViewById(R.id.spinnerSymbolMs);
+        symbolSpinner.setAdapter(symbolAdapter);
+        int defaultSymbolMs = Constants.snapSymbolDurationMs(Constants.opticalSymbolDurationMs);
+        symbolSpinner.setSelection(symbolOptions.indexOf(String.valueOf(defaultSymbolMs)));
+        symbolSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                Constants.opticalSymbolDurationMs = Integer.parseInt(symbolOptions.get(position));
+                PreferenceManager.getDefaultSharedPreferences(MainActivity.this)
+                        .edit().putInt("optical_symbol_ms", Constants.opticalSymbolDurationMs).apply();
+                updateMoeStatus();
+                Utils.log("optical symbol duration set to " + Constants.opticalSymbolDurationMs + "ms");
+            }
+
             @Override
             public void onNothingSelected(AdapterView <?> parent) {
             }
@@ -2763,80 +3206,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 //                }
 //            }
 //        });
-    }
-
-    private void startCameraPreviewIfPermitted() {
-        if (cameraPreviewRequested) {
-            return;
-        }
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-                != PackageManager.PERMISSION_GRANTED) {
-            Constants.cameraCaptureBtn.setEnabled(false);
-            return;
-        }
-
-        cameraPreviewRequested = true;
-        Constants.cameraCaptureBtn.setEnabled(false);
-        Constants.cameraProviderFuture = ProcessCameraProvider.getInstance(this);
-        Constants.cameraProviderFuture.addListener(() -> {
-            try {
-                ProcessCameraProvider cameraProvider = Constants.cameraProviderFuture.get();
-                // Arm optical reception before binding so the analysis use case is
-                // included in the same session rather than needing a second bind.
-                if (Constants.user == Constants.User.Bob) {
-                    if (opticalReceiver == null) {
-                        opticalReceiver = new OpticalReceiver();
-                        opticalReceiver.setListener(this::onOpticalTokensReceived);
-                    }
-                    CameraHelper.setOpticalReceiver(opticalReceiver);
-                    CameraHelper.setOpticalReceiveEnabled(true);
-                }
-                boolean bound = CameraHelper.bindCamera(cameraProvider, this, mImageView2);
-                if (bound) {
-                    Constants.preview.setVisibility(View.VISIBLE);
-                }
-                Constants.cameraCaptureBtn.setEnabled(bound);
-                if (!bound) {
-                    cameraPreviewRequested = false;
-                }
-            } catch (ExecutionException e) {
-                cameraPreviewRequested = false;
-                Utils.logd("Unable to obtain camera provider: " + e);
-            } catch (InterruptedException e) {
-                cameraPreviewRequested = false;
-                Thread.currentThread().interrupt();
-                Utils.logd("Camera provider initialization was interrupted");
-            }
-        }, ContextCompat.getMainExecutor(this));
-    }
-
-    /**
-     * Reconstruct the image from a demodulated optical burst.
-     *
-     * Mirrors the acoustic receive path: decode the tokens as received, then run
-     * the error-correcting transformer and decode again, so both images are
-     * available for comparison. Token-level errors arrive as the lost-token marker
-     * (4096) and are repaired by the transformer.
-     */
-    private void onOpticalTokensReceived(long[] tokens, boolean[] tokenValid, int errorCount) {
-        new Thread(() -> {
-            try {
-                long[] masked = Arrays.copyOf(tokens, tokens.length);
-                for (int i = 0; i < tokens.length; i++) {
-                    if (!tokenValid[i]) {
-                        masked[i] = 4096;
-                    }
-                }
-                long[] prediction = Utils.transformer_recover(masked);
-                Utils.decode_image_receiver(tokens, mImageView2, true);
-                Utils.decode_image_receiver(prediction, mImageView, false);
-                MoE.recordResult(true, Constants.CommMedium.OPTICAL);
-            } catch (Exception e) {
-                Utils.logd("Optical reconstruction failed: " + e);
-                MoE.recordResult(false, Constants.CommMedium.OPTICAL);
-            }
-        }, "OpticalReconstruct").start();
     }
 
     // ********************************** End App Long Methods **********************************

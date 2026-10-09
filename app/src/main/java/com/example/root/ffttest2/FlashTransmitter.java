@@ -20,23 +20,42 @@ public class FlashTransmitter {
     private static final String TAG = "FlashTransmitter";
     // Symbol duration in milliseconds.
     //
-    // The optical receiver is a phone camera, not a photodiode, and this value is
-    // bounded by the camera, not by the torch. CameraX delivers ~28-30 fps on a
-    // typical device, so a symbol must be long enough to be oversampled:
+    // The optical receiver is a phone camera, not a photodiode, so this is
+    // bounded by how many frames per second the camera actually delivers:
     //
     //   samples_per_symbol = frame_rate * symbol_ms / 1000
     //
-    // At 30 fps, 100 ms gives 3 samples per symbol, which is enough to resolve
-    // the eye pattern. The 33 ms that would be appropriate for a photodiode gives
-    // only 0.9 samples and cannot be demodulated at all - the receiver measures
-    // and reports the achieved rate on the first frames so this can be checked on
-    // the actual device before a field test.
+    // The demodulator decides each symbol over the middle 60 percent of its
+    // samples, so it needs at least 2 frames per symbol before a single dropped
+    // frame can flip a decision; 2.7-3 is where it is comfortable.
     //
-    // The cost is link time, and it is steep: a 4096-codebook image is 64 tokens
-    // = 96 bytes = 960 line bits, so at 100 ms the flash is on for ~96 s. Cutting
-    // that down requires either a faster sensor or a smaller payload, both of
-    // which are product decisions rather than tuning.
-    static final int SYMBOL_DURATION_MS = 100;
+    // Measured on an SM-A346E, with the periodic rate log this app now emits:
+    // the camera settles at 8.7-9.1 fps and stays there. Three separate
+    // attempts to raise that all failed:
+    //
+    //   binding only the analysis use case, dropping preview and capture
+    //                               9.0 fps
+    //   binding analysis alongside preview and capture
+    //                               9.0 fps
+    //   asking for a 320x240 analysis stream instead of 640x480
+    //                               8.8 fps
+    //
+    // The analyzer itself takes 0.2-0.8 ms of a 112 ms frame interval, so none
+    // of this is CPU. The limit is the camera's exposure cycle, which in turn
+    // tracks scene brightness - which means the rate during a real burst, with
+    // a torch pointed at the lens, may well be higher than it is idle in a dim
+    // room. That has to be read off the log during the field test before this
+    // number is lowered.
+    //
+    // 300 ms gives 2.7 samples per symbol at the measured 9 fps. Going to
+    // 120 ms - a tempting 2.5x cut in link time - gives 1.1, which cannot
+    // resolve the eye pattern at all, so it is not a usable value on this
+    // hardware until the lit burst proves the camera is faster than idle.
+    //
+    // Cost of the 300 ms choice: a 4096-codebook image is 64 tokens = 96 bytes
+    // = 960 line bits, plus a 16-symbol preamble and an 8-symbol postamble, so
+    // the flash runs 984 * 300 ms = about 295 seconds.
+    static final int SYMBOL_DURATION_MS = 300;
     // Burst framing. The preamble alternates so the receiver can lock symbol
     // timing on the transitions and cannot confuse it with a long run of 1s in
     // the payload. The postamble is a solid run, which is the opposite pattern
@@ -61,6 +80,52 @@ public class FlashTransmitter {
         long[] tokens = Utils.encode_image(bitmap);
         return transmitTokens(context, tokens);
     }
+
+    /**
+     * Transmit a short known pattern instead of a real image payload.
+     *
+     * <p>The full 4096-codebook image is 960 line bits, which at
+     * {@link #SYMBOL_DURATION_MS} is a ~5 minute flash. That is far too slow to
+     * iterate on the physical link, because getting a decode needs three things
+     * lined up at once: the camera aimed at the torch, the torch bright enough at
+     * that distance, and the receiver's threshold tracking the room light. Each
+     * of those needs several tries.
+     *
+     * <p>This sends a fixed 4-byte pattern, so the burst is 16 preamble + 40 line
+     * bits + 8 postamble = 64 symbols, about 19 seconds. The receiver decodes it
+     * with exactly the same 4B5B and symbol-clock code as the image payload, so a
+     * clean result here means the framing, alignment and threshold are all good
+     * and only the image decode remains unproven.
+     *
+     * @param context Context used to access the CameraManager.
+     * @return true if transmission completed without errors, false otherwise.
+     */
+    public static boolean transmitLinkCheck(Context context) {
+        if (context == null) {
+            Log.e(TAG, "Context is null, abort link check");
+            return false;
+        }
+        try {
+            byte[] pattern = LINK_CHECK_PATTERN;
+            int[] bits = encode4b5b(pattern);
+            Log.i(TAG, "Link check: " + pattern.length + " bytes -> " + bits.length
+                    + " line bits ("
+                    + (PREAMBLE_SYMBOLS + bits.length + POSTAMBLE_SYMBOLS)
+                    * Constants.opticalSymbolDurationMs / 1000f
+                    + "s burst at " + Constants.opticalSymbolDurationMs + "ms symbols)");
+            return sendBitsViaFlash(context, bits);
+        } catch (Exception e) {
+            Log.e(TAG, "Exception during link check", e);
+            return false;
+        }
+    }
+
+    /**
+     * The known bytes a link check sends. Deliberately not all zeros or all ones:
+     * a uniform pattern can decode cleanly even when the threshold is drifting,
+     * whereas alternating nibbles force every bit boundary to be exercised.
+     */
+    static final byte[] LINK_CHECK_PATTERN = {0x1A, (byte) 0xC3, 0x5A, (byte) 0xA5};
 
     /**
      * Transmit an already-encoded token array via the device flash.
@@ -94,9 +159,20 @@ public class FlashTransmitter {
             int[] bits = encode4b5b(embedding);
             Log.i(TAG, "Transmitting " + tokens.length + " tokens -> " + embedding.length
                     + " bytes -> " + bits.length + " line bits ("
-                    + (PREAMBLE_SYMBOLS + bits.length + POSTAMBLE_SYMBOLS) * SYMBOL_DURATION_MS / 1000f + "s burst)");
+                    + (PREAMBLE_SYMBOLS + bits.length + POSTAMBLE_SYMBOLS)
+                    * Constants.opticalSymbolDurationMs / 1000f
+                    + "s burst at " + Constants.opticalSymbolDurationMs + "ms symbols)");
             // 3. Send preamble followed by the data bits via the torch (OOK).
-            return sendBitsViaFlash(context, bits);
+            long burstStart = System.currentTimeMillis();
+            boolean ok = sendBitsViaFlash(context, bits);
+            if (ok) {
+                long elapsed = System.currentTimeMillis() - burstStart;
+                int symbols = PREAMBLE_SYMBOLS + bits.length + POSTAMBLE_SYMBOLS;
+                Log.i(TAG, "Optical transmission completed: " + symbols + " symbols in " + elapsed
+                        + "ms -> " + String.format("%.1f", elapsed / (double) symbols)
+                        + "ms per symbol (nominal " + Constants.opticalSymbolDurationMs + "ms)");
+            }
+            return ok;
         } catch (Exception e) {
             Log.e(TAG, "Exception during flash transmission", e);
             return false;
@@ -163,6 +239,66 @@ public class FlashTransmitter {
     // Send bits using the device torch (OOK). Runs synchronously, so it must
     // be invoked from a background thread.
     // ---------------------------------------------------------------------
+
+    /**
+     * How long to keep retrying the torch while the camera is still held.
+     *
+     * ProcessCameraProvider.unbindAll() only *requests* the teardown, so for a
+     * short window after it returns the camera device is still owned by CameraX
+     * and setTorchMode fails with
+     * "Torch for camera X is not available due to an existing camera user"
+     * (ServiceSpecificException, code 7). Retrying for a couple of seconds is
+     * what makes the handoff reliable.
+     */
+    private static final long TORCH_RELEASE_TIMEOUT_MS = 3000;
+    private static final long TORCH_RETRY_INTERVAL_MS = 100;
+
+    /**
+     * Drive the torch, waiting for the camera to become free.
+     *
+     * @return true when the torch was driven successfully.
+     */
+    private static boolean setTorchWithRetry(CameraManager camMgr, String flashCamId, boolean on) {
+        long deadline = System.currentTimeMillis() + TORCH_RELEASE_TIMEOUT_MS;
+        boolean lastBusy = false;
+        do {
+            try {
+                camMgr.setTorchMode(flashCamId, on);
+                if (lastBusy) {
+                    Log.i(TAG, "torch became available after waiting for the camera, continuing burst");
+                }
+                return true;
+            } catch (CameraAccessException e) {
+                // CAMERA_IN_USE is the retryable one: the camera device is still
+                // owned by CameraX while it finishes tearing the session down.
+                // Anything else (no flash unit, disabled by policy) is terminal.
+                String reason = e.getMessage() == null ? "" : e.getMessage();
+                boolean busy = e.getReason() == CameraAccessException.CAMERA_IN_USE
+                        || reason.contains("CAMERA_IN_USE")
+                        || reason.contains("existing camera user");
+                if (!busy) {
+                    Log.e(TAG, "setTorchMode(" + on + ") failed permanently: " + e);
+                    return false;
+                }
+                lastBusy = true;
+            } catch (RuntimeException e) {
+                // ServiceSpecificException code 7: the camera is still held by
+                // another client. This is a race, not a hard failure.
+                lastBusy = true;
+            }
+            try {
+                Thread.sleep(TORCH_RETRY_INTERVAL_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        } while (System.currentTimeMillis() < deadline);
+
+        Log.e(TAG, "torch still unavailable after " + TORCH_RELEASE_TIMEOUT_MS
+                + "ms (camera held by another client); giving up");
+        return false;
+    }
+
     private static boolean sendBitsViaFlash(Context ctx, int[] bits) {
         CameraManager camMgr = (CameraManager) ctx.getSystemService(Context.CAMERA_SERVICE);
         if (camMgr == null) {
@@ -177,18 +313,19 @@ public class FlashTransmitter {
         try {
             // Preamble: alternating symbols so the receiver can detect the burst
             // start and lock its symbol clock on the transitions.
+            if (!setTorchWithRetry(camMgr, flashCamId, true)) return false;
             for (int i = 0; i < PREAMBLE_SYMBOLS; i++) {
                 camMgr.setTorchMode(flashCamId, (i & 1) == 0);
-                Thread.sleep(SYMBOL_DURATION_MS);
+                Thread.sleep(Constants.opticalSymbolDurationMs);
             }
             for (int bit : bits) {
                 camMgr.setTorchMode(flashCamId, bit == 1);
-                Thread.sleep(SYMBOL_DURATION_MS);
+                Thread.sleep(Constants.opticalSymbolDurationMs);
             }
             // End-of-burst: a solid run, the inverse of the preamble pattern.
             for (int i = 0; i < POSTAMBLE_SYMBOLS; i++) {
                 camMgr.setTorchMode(flashCamId, true);
-                Thread.sleep(SYMBOL_DURATION_MS);
+                Thread.sleep(Constants.opticalSymbolDurationMs);
             }
             camMgr.setTorchMode(flashCamId, false);
             return true;
@@ -202,8 +339,11 @@ public class FlashTransmitter {
         } finally {
             try {
                 camMgr.setTorchMode(flashCamId, false);
-            } catch (CameraAccessException e) {
-                Log.e(TAG, "Failed to turn off torch", e);
+            } catch (CameraAccessException | RuntimeException e) {
+                // RuntimeException included on purpose: leaving the torch stuck
+                // on is worse than failing to turn it off cleanly, and it must
+                // not propagate out of finally.
+                Log.e(TAG, "Failed to turn off torch: " + e);
             }
         }
     }

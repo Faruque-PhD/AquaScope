@@ -24,10 +24,12 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 /**
- * AsyncTask that performs the chirp‑send routine.
- * Previously used AsyncTask<Void, Void, Void> which caused a ClassCastException
- * because Android supplies an Object[] to doInBackground. Switching the input
- * type to Object avoids the illegal cast while keeping the task parameter‑less.
+ * AsyncTask that performs the chirp-send routine.
+ *
+ * The input type is Object rather than Void: Constants.task is a raw AsyncTask and
+ * Android supplies an Object[] to doInBackground, so a Void[] parameter list makes
+ * the compiler-inserted cast throw ClassCastException. This signature matches
+ * hybrid commit 8fe594e and is unrelated to the camera work.
  */
 public class SendChirpAsyncTask extends AsyncTask<Object, Void, Void> {
     Activity av;
@@ -102,12 +104,14 @@ public class SendChirpAsyncTask extends AsyncTask<Object, Void, Void> {
             tv4.setText("0");
         }
 
-        // Record acoustic transmission success in MoE buffer
-        MoEManager.recordResult(true, Constants.CommMedium.ACOUSTIC);
-
         Constants.sp1=null;
         Constants._OfflineRecorder = null;
         Constants.user  = Constants.User.Bob;
+        // Hand the channel to optical now the acoustic transmission is over, so
+        // the next one alternates. Before startMethod so the device arms its
+        // receive side for the medium it is about to listen on. Silent unless
+        // auto-switching is enabled in the UI.
+        MainActivity.autoSwitchMedium(Constants.CommMedium.ACOUSTIC);
         MainActivity.startMethod(av);
 
         if (defaultBackground != null) { // otherwise the button will be transparent
@@ -168,24 +172,30 @@ public class SendChirpAsyncTask extends AsyncTask<Object, Void, Void> {
             }
         }
         /* end2endTest mode
-        Sender sends the most recent camera capture to receiver.
+        Sender sends 5 test images to receiver.
          */
         else if (Constants.expMode == Constants.Experiment.end2endTest) {
             // end2endTest sender
             if (Constants.user.equals(Constants.User.Alice)) {
-                // step 1 use the freshly clicked camera frame. Returns null when
-                // the user has not taken a picture, in which case we must not send.
-                Bitmap mBitmap = MainActivity.resolveSendBitmap();
-                if (mBitmap == null) {
-                    Utils.log("end2endTest: no camera capture, skipping send");
-                    return null;
+                // step 1 read out file path in testImages and convert each image to scaled bitmap
+                // done in app onCreate and the bitmaps are passed as arguments
+
+                // step 2 for each bitmap
+                for (Bitmap mBitmap : testEnd2EndImageBitmaps) {
+
+                    // step 2-1 prepare send
+                    Utils.imageSendPrepare(mBitmap, mImageView, TaskID);
+
+                    // step 2-2 send
+                    work(0, true);
+
+                    // step 2-3 sleep til next send
+                    try {
+                        Thread.sleep(Constants.end2endTestDelay);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
                 }
-
-                // step 2-1 prepare send
-                Utils.imageSendPrepare(mBitmap, mImageView, TaskID);
-
-                // step 2-2 send
-                work(0, true);
             }
             // end2endTest receiver
             else if (Constants.user.equals(Constants.User.Bob)) {
@@ -200,12 +210,8 @@ public class SendChirpAsyncTask extends AsyncTask<Object, Void, Void> {
             // end2endCam sender
             if (Constants.user.equals(Constants.User.Alice)) {
 
-                // step 1 load the freshly clicked camera frame
-                Bitmap mBitmap = MainActivity.resolveSendBitmap();
-                if (mBitmap == null) {
-                    Utils.log("end2endCam: no camera capture, skipping send");
-                    return null;
-                }
+                // step 1 load the camera captured bitmap
+                Bitmap mBitmap = Constants.currentCameraCapture;
 
                 // step 2-1 prepare send
                 Utils.imageSendPrepare(mBitmap, mImageView, TaskID);
@@ -277,11 +283,7 @@ public class SendChirpAsyncTask extends AsyncTask<Object, Void, Void> {
                             // make folder for current sending information
                             FileOperations.mkdir(av, Constants.currentDirPath);
 
-                            Bitmap mBitmap = MainActivity.resolveSendBitmap();
-                            if (mBitmap == null) {
-                                Utils.log("dataCollection: no camera capture, stopping collection");
-                                return null;
-                            }
+                            Bitmap mBitmap = testEnd2EndImageBitmaps.get(i);
                             Utils.imageSendPrepare(mBitmap, mImageView, TaskID);
 
                             work(0, true);

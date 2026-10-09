@@ -50,6 +50,8 @@ import android.widget.ImageView;
 
 import org.apache.commons.math3.complex.Complex;
 import org.pytorch.IValue;
+import org.pytorch.LiteModuleLoader;
+import org.pytorch.Module;
 import org.pytorch.Tensor;
 import org.pytorch.torchvision.TensorImageUtils;
 
@@ -996,16 +998,23 @@ public class Utils {
     public static void log(String s) {
         if (Constants.allowLog) {
             Log.e(Constants.LOG, s);
-            (MainActivity.av).runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    if (Constants.debugPane.getText().toString().length() > 400) {
-                        Constants.debugPane.setText("");
+            // av is not assigned until onCreate's UI binding has run, and log()
+            // is reachable from onCreate (setup, spinner wiring) on the main
+            // thread. Reflect that ordering rather than crashing every cold
+            // start: the debug pane simply misses early lines, and logd() is
+            // unaffected.
+            if (MainActivity.av != null) {
+                (MainActivity.av).runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (Constants.debugPane.getText().toString().length() > 400) {
+                            Constants.debugPane.setText("");
+                        }
+                        Constants.debugPane.setText(Constants.debugPane.getText() + "\n" + s);
+                        scrollToBottom();
                     }
-                    Constants.debugPane.setText(Constants.debugPane.getText() + "\n" + s);
-                    scrollToBottom();
-                }
-            });
+                });
+            }
         }
     }
 
@@ -2863,6 +2872,20 @@ public class Utils {
         if (file.exists() && file.length() > 0) {
             return file.getAbsolutePath();
         }
+
+        // The checkpoints are far too large to ship in the APK, so they are installed
+        // by hand. The app-private external dir is accepted as well as filesDir:
+        // on a device without root, `adb push <file> /sdcard/Android/data/<pkg>/files/`
+        // is reachable while writing straight into filesDir is not, and copying ~1.4 GB
+        // on every reinstall is not something to ask of the user.
+        File external = context.getExternalFilesDir(null);
+        if (external != null) {
+            File externalFile = new File(external, assetName);
+            if (externalFile.exists() && externalFile.length() > 0) {
+                return externalFile.getAbsolutePath();
+            }
+        }
+
         // The model loader reads from the app data dir, so if the file has not been
         // extracted yet, copy it out of the packaged assets. This makes model loading
         // self-contained whenever the package ships real model binaries.
@@ -3052,7 +3075,28 @@ public class Utils {
 //        return vqganGtBitmap;
 //    }
 
+    /**
+     * Number of tokens the codec produces for one image. The model is fixed at
+     * 64 tokens, and decode_image builds its input tensor with this shape, so an
+     * input of any other length is rejected rather than handed to PyTorch.
+     */
+    private static final int EXPECTED_TOKEN_COUNT = 64;
+
     public static Bitmap decode_image(long[] results) {
+
+        // A missing or failed encode yields an empty array. Building the tensor
+        // from it throws "Inconsistent data capacity:0 and shape number
+        // elements:64 shape:[64]", which used to crash the send task. Report the
+        // problem and return null instead.
+        if (results == null || results.length == 0) {
+            Utils.log("decode_image: no tokens to decode (encoder unavailable or produced nothing)");
+            return null;
+        }
+        if (results.length != EXPECTED_TOKEN_COUNT) {
+            Utils.log("decode_image: expected " + EXPECTED_TOKEN_COUNT + " tokens, got "
+                    + results.length + "; refusing to build the decode tensor");
+            return null;
+        }
 
         // Beitong0711: decide if we want to use code 1024 or 256
         if (Constants.codebookSize.equals("1024") || Constants.codebookSize.equals("4096")) {
@@ -3075,7 +3119,7 @@ public class Utils {
         }
 
 
-        Tensor inputTensordecode = Tensor.fromBlob(results, new long[]{64});
+        Tensor inputTensordecode = Tensor.fromBlob(results, new long[]{EXPECTED_TOKEN_COUNT});
         Tensor outTensorsdecode;
         if (Constants.codebookSize.equals("1024")) {
             outTensorsdecode = Constants.mDecoder1.forward(IValue.from(inputTensordecode)).toTensor();
@@ -3191,6 +3235,37 @@ public class Utils {
 
     public static void decode_image_receiver(long[] results, ImageView mImageView, boolean before) {
 
+        // Mirror the guard in decode_image: an empty or wrongly sized token array
+        // would make Tensor.fromBlob throw "Inconsistent data capacity", which
+        // previously killed the process instead of just failing this decode.
+        if (results == null || results.length == 0) {
+            Utils.log("decode_image_receiver: no tokens to decode");
+            return;
+        }
+        if (results.length != EXPECTED_TOKEN_COUNT) {
+            Utils.log("decode_image_receiver: expected " + EXPECTED_TOKEN_COUNT + " tokens, got "
+                    + results.length + "; refusing to build the decode tensor");
+            return;
+        }
+
+        // Name the decoder this codebook needs and refuse clearly when it was never
+        // loaded, rather than dereferencing null. Only the 4096 path has a live
+        // loader; mDecoder1/2/3 and mEmbedding_256 are declared but never assigned,
+        // so the 1024 and 256 codebooks cannot decode at all.
+        Module decoder = null;
+        if (Constants.codebookSize.equals("1024")) {
+            decoder = Constants.mDecoder1;
+        } else if (Constants.codebookSize.equals("256")) {
+            decoder = Constants.mEmbedding_256;
+        } else {
+            decoder = Constants.newDecoder;
+        }
+        if (decoder == null) {
+            Utils.log("decode_image_receiver: no decoder loaded for codebook "
+                    + Constants.codebookSize + "; cannot reconstruct the image");
+            return;
+        }
+
         // Beitong0711: decide if we want to use code 1024 or 256
         if (Constants.codebookSize.equals("1024") || Constants.codebookSize.equals("4096")) {
             Utils.logd("use codebook " + Constants.codebookSize.toString() + " do nothing");
@@ -3213,7 +3288,7 @@ public class Utils {
 
         // receiver t6 decode image 1 (before recover)
         final long startTime_decode_image = SystemClock.elapsedRealtime();
-        Tensor inputTensordecode = Tensor.fromBlob(results, new long[]{64});
+        Tensor inputTensordecode = Tensor.fromBlob(results, new long[]{EXPECTED_TOKEN_COUNT});
         Tensor outTensorsdecode;
         if (Constants.codebookSize.equals("1024")) {
             outTensorsdecode = Constants.mDecoder1.forward(IValue.from(inputTensordecode)).toTensor();
@@ -3334,6 +3409,38 @@ public class Utils {
 //        return prediction;
 //    }
 
+    /**
+     * Load the recover transformer on first receiver use.
+     *
+     * This is the only consumer of myRecover_optimized.ptl, and the checkpoint is
+     * 709 MB. It used to be loaded eagerly during startup together with the encoder
+     * and decoder, which is more memory than a small device can hold all at once.
+     *
+     * @return true when the model is available.
+     */
+    public static synchronized boolean ensureRecoverLoaded() {
+        if (Constants.newTransformer != null) {
+            return true;
+        }
+        if (MainActivity.av == null) {
+            Utils.log("recover model unavailable: no activity context to resolve the checkpoint path");
+            return false;
+        }
+        try {
+            Context ctx = MainActivity.av.getApplicationContext();
+            Utils.log("loading recover model on demand (first receiver frame)");
+            Constants.newTransformer = LiteModuleLoader.load(assetFilePath(ctx, "myRecover_optimized.ptl"));
+            if (Constants.newTransformer == null) {
+                Utils.log("recover model failed to load from myRecover_optimized.ptl");
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            Utils.log("recover model failed to load: " + e);
+            return false;
+        }
+    }
+
     public static long[] transformer_recover(long[] embeddings) {
 
 //        if (Constants.codebookSize.equals("256")) {
@@ -3341,12 +3448,22 @@ public class Utils {
 //            return embeddings;
 //        }
 
+        if (embeddings == null || embeddings.length == 0) {
+            Utils.log("transformer_recover: no embeddings to recover");
+            return new long[EXPECTED_TOKEN_COUNT];
+        }
+        if (!ensureRecoverLoaded()) {
+            // Hand the raw embeddings back rather than crashing; the caller can still
+            // report a decode result, and the log line names the missing checkpoint.
+            return embeddings;
+        }
+
         // receiver t5 transformer recover
         final long startTime_transformer_recover = SystemClock.elapsedRealtime();
         long[] prediction = new long[embeddings.length];
         if (Constants.codebookSize.equals("4096")) {
 
-            Tensor inputTensor = Tensor.fromBlob(embeddings, new long[]{64});
+            Tensor inputTensor = Tensor.fromBlob(embeddings, new long[]{EXPECTED_TOKEN_COUNT});
             Tensor result = Constants.newTransformer.forward(IValue.from(inputTensor)).toTensor();
 
             prediction = result.getDataAsLongArray();
@@ -3444,6 +3561,14 @@ public class Utils {
         Constants.Sender_Latency_Str = Constants.Sender_Latency_Str + "sender encode image (ms): " + inferenceTime + "\n";
         Utils.log("Sender_Latency_Str: " + Constants.Sender_Latency_Str);
 
+        // An empty sequence means the codec is not loaded. There is nothing to log
+        // or decode, and the ground-truth decode below used to hand the empty array
+        // to PyTorch and crash the send task.
+        if (results == null || results.length == 0) {
+            Utils.log("imageSendPrepare: encoder produced no tokens; aborting before the log/decode stage");
+            return;
+        }
+
         // save some results, this might introduce extra latency, but here we only use it to test the accuracy
         if (Constants.allowLog) {
             Utils.log("send embedding: " + Arrays.toString(results));
@@ -3454,8 +3579,12 @@ public class Utils {
 
             // generate VQGAN decoded image ground truth
             Bitmap vqganGtBitmap = Utils.decode_image(results);
-            // save VQGAN decoded image ground truth (encoded and decoded via VQGAN)
-            FileOperations.saveBitmapToFile(MainActivity.av, vqganGtBitmap, Utils.genName(Constants.SignalType.Sent_Gt_Bitmap, 0) + ".png");
+            if (vqganGtBitmap != null) {
+                // save VQGAN decoded image ground truth (encoded and decoded via VQGAN)
+                FileOperations.saveBitmapToFile(MainActivity.av, vqganGtBitmap, Utils.genName(Constants.SignalType.Sent_Gt_Bitmap, 0) + ".png");
+            } else {
+                Utils.log("imageSendPrepare: ground-truth decode returned nothing; skipping the saved image");
+            }
         }
     }
 
