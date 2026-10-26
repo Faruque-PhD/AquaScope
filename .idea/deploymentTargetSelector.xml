@@ -4,43 +4,10 @@
     <selectionStates>
       <SelectionState runConfigName="app">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-09-07T11:42:06.815685833Z">
+        <DropdownSelection timestamp="2026-10-10T15:17:42.642134Z">
           <Target type="DEFAULT_BOOT">
             <handle>
-              <DeviceId pluginId="LocalEmulator" identifier="path=/home/user/.android/avd/Pixel_9.avd" />
-            </handle>
-          </Target>
-        </DropdownSelection>
-        <DialogSelection />
-      </SelectionState>
-      <SelectionState runConfigName="main">
-        <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-09-07T11:42:06.815685833Z">
-          <Target type="DEFAULT_BOOT">
-            <handle>
-              <DeviceId pluginId="LocalEmulator" identifier="path=/home/user/.android/avd/Pixel_9.avd" />
-            </handle>
-          </Target>
-        </DropdownSelection>
-        <DialogSelection />
-      </SelectionState>
-      <SelectionState runConfigName="androidTest">
-        <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-09-07T11:42:06.815685833Z">
-          <Target type="DEFAULT_BOOT">
-            <handle>
-              <DeviceId pluginId="LocalEmulator" identifier="path=/home/user/.android/avd/Pixel_9.avd" />
-            </handle>
-          </Target>
-        </DropdownSelection>
-        <DialogSelection />
-      </SelectionState>
-      <SelectionState runConfigName="unitTest">
-        <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-09-07T11:42:06.815685833Z">
-          <Target type="DEFAULT_BOOT">
-            <handle>
-              <DeviceId pluginId="LocalEmulator" identifier="path=/home/user/.android/avd/Pixel_9.avd" />
+              <DeviceId pluginId="LocalEmulator" identifier="path=/Users/faruqueaziz/.android/avd/Pixel_9_API_35.avd" />
             </handle>
           </Target>
         </DropdownSelection>
